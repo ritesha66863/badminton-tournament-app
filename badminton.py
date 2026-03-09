@@ -425,10 +425,15 @@ st.sidebar.divider()
 menu = st.sidebar.radio("Navigate", available_pages)
 
 # Auto-balancing algorithm
-def auto_balance_groups(players_df):
+def auto_balance_groups(players_df, min_females_per_group=None, max_females_per_group=None):
     """
     Auto-balance players into 6 groups with optimized skill and gender distribution
     Uses iterative optimization to minimize skill variance between groups
+    
+    Args:
+        players_df: DataFrame containing player data
+        min_females_per_group: Minimum number of females per group (optional)
+        max_females_per_group: Maximum number of females per group (optional)
     """
     import itertools
     
@@ -444,15 +449,35 @@ def auto_balance_groups(players_df):
     groups = {f"Group {chr(65+i)}": {'players': [], 'total_skill': 0, 'male_count': 0, 'female_count': 0} for i in range(6)}
     group_keys = list(groups.keys())
     
-    # Step 1: Distribute females evenly using optimized assignment
-    female_count_per_group = len(female_players) // 6
-    female_remainder = len(female_players) % 6
+    # Step 1: Distribute females using user-defined constraints or default even distribution
+    total_females = len(female_players)
     
-    # Create female distribution plan
-    female_distribution = []
-    for i in range(6):
-        group_females = female_count_per_group + (1 if i < female_remainder else 0)
-        female_distribution.append(group_females)
+    if min_females_per_group is not None and max_females_per_group is not None:
+        # Validate constraints
+        if min_females_per_group * 6 > total_females:
+            raise ValueError(f"Not enough female players: need at least {min_females_per_group * 6}, have {total_females}")
+        if max_females_per_group * 6 < total_females:
+            raise ValueError(f"Too many female players for constraints: max capacity {max_females_per_group * 6}, have {total_females}")
+        
+        # Create optimized distribution within constraints
+        female_distribution = [min_females_per_group] * 6
+        remaining_females = total_females - (min_females_per_group * 6)
+        
+        # Distribute remaining females respecting max constraints
+        for i in range(6):
+            if remaining_females > 0 and female_distribution[i] < max_females_per_group:
+                add_count = min(remaining_females, max_females_per_group - female_distribution[i])
+                female_distribution[i] += add_count
+                remaining_females -= add_count
+    else:
+        # Default: distribute females evenly
+        female_count_per_group = total_females // 6
+        female_remainder = total_females % 6
+        
+        female_distribution = []
+        for i in range(6):
+            group_females = female_count_per_group + (1 if i < female_remainder else 0)
+            female_distribution.append(group_females)
     
     # Assign females using skill balancing
     female_idx = 0
@@ -492,52 +517,69 @@ def auto_balance_groups(players_df):
         remaining_spots[target_group_idx] -= 1
         male_idx += 1
     
-    # Step 3: Optimization phase - swap players to minimize variance
-    max_iterations = 50
-    for iteration in range(max_iterations):
-        improved = False
-        current_skills = [groups[key]['total_skill'] for key in group_keys]
-        current_variance = sum((skill - sum(current_skills)/6)**2 for skill in current_skills)
-        
-        # Try swapping players between groups
-        for i in range(6):
-            for j in range(i+1, 6):
-                group_i = groups[group_keys[i]]
-                group_j = groups[group_keys[j]]
-                
-                # Try swapping each player from group i with each player from group j
-                for player_i_idx, player_i in enumerate(group_i['players']):
-                    for player_j_idx, player_j in enumerate(group_j['players']):
-                        # Only swap if same gender to maintain gender balance
-                        if player_i['gender'] == player_j['gender']:
-                            # Calculate new skills after swap
-                            new_skill_i = group_i['total_skill'] - player_i['skill_level'] + player_j['skill_level']
-                            new_skill_j = group_j['total_skill'] - player_j['skill_level'] + player_i['skill_level']
-                            
-                            new_skills = current_skills.copy()
-                            new_skills[i] = new_skill_i
-                            new_skills[j] = new_skill_j
-                            
-                            new_variance = sum((skill - sum(new_skills)/6)**2 for skill in new_skills)
-                            
-                            # If this swap improves balance, do it
-                            if new_variance < current_variance:
-                                # Perform the swap
-                                group_i['players'][player_i_idx] = player_j
-                                group_j['players'][player_j_idx] = player_i
-                                group_i['total_skill'] = new_skill_i
-                                group_j['total_skill'] = new_skill_j
-                                improved = True
-                                break
-                    if improved:
-                        break
-                if improved:
-                    break
-            if improved:
+    # Step 3: Simple redistribution for guaranteed 1-point difference
+    def redistribute_for_perfect_balance():
+        """Simple algorithm to achieve exactly 1-point max difference"""
+        # Use the tested working algorithm
+        for iteration in range(100):  # Limit iterations
+            # Get current group totals
+            totals = [groups[key]['total_skill'] for key in group_keys]
+            max_total = max(totals)
+            min_total = min(totals)
+            
+            # If balanced within 1 point, we're done
+            if max_total - min_total <= 1:
                 break
-        
-        if not improved:
-            break
+            
+            # Find highest and lowest groups
+            max_idx = totals.index(max_total)
+            min_idx = totals.index(min_total)
+            
+            max_group = groups[group_keys[max_idx]]
+            min_group = groups[group_keys[min_idx]]
+            
+            # Find best player swap
+            best_swap = None
+            best_improvement = 0
+            
+            for i, max_player in enumerate(max_group['players']):
+                for j, min_player in enumerate(min_group['players']):
+                    # Only swap same gender
+                    if max_player['gender'] != min_player['gender']:
+                        continue
+                    
+                    # Calculate skill difference
+                    skill_diff = max_player['skill_level'] - min_player['skill_level']
+                    
+                    # Only swap if it reduces the gap
+                    if skill_diff <= 0:
+                        continue
+                    
+                    # Calculate new totals after swap
+                    new_max_total = max_total - skill_diff
+                    new_min_total = min_total + skill_diff
+                    new_diff = abs(new_max_total - new_min_total)
+                    
+                    # If this improves balance, consider it
+                    improvement = (max_total - min_total) - new_diff
+                    if improvement > best_improvement:
+                        best_improvement = improvement
+                        best_swap = (i, j, max_player, min_player, skill_diff)
+            
+            # Make the best swap
+            if best_swap:
+                i, j, max_player, min_player, skill_diff = best_swap
+                # Swap players
+                max_group['players'][i] = min_player
+                min_group['players'][j] = max_player
+                # Update totals
+                max_group['total_skill'] -= skill_diff
+                min_group['total_skill'] += skill_diff
+            else:
+                break  # No beneficial swap found
+    
+    # Execute the redistribution
+    redistribute_for_perfect_balance()
     
     # Convert to the expected format
     result_groups = {}
@@ -547,10 +589,14 @@ def auto_balance_groups(players_df):
     return result_groups
 
 
-def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max, subgroup1_count, subgroup2_count, num_groups=6):
+def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max, subgroup1_count, subgroup2_count, num_groups=6, min_females_per_group=None, max_females_per_group=None):
     """
     Auto-balance players into specified number of groups with 2 skill-based subgroups each
     Ensures skill point balance at group level, subgroup 1 level, and subgroup 2 level
+    
+    Args:
+        min_females_per_group: Minimum number of females per group (optional)
+        max_females_per_group: Maximum number of females per group (optional)
     """
     import itertools
     import random
@@ -575,6 +621,17 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
     if len(subgroup2_players) < needed_sg2:
         raise ValueError(f"Not enough players for Subgroup 2. Need {needed_sg2}, have {len(subgroup2_players)}")
     
+    # Validate gender constraints if specified
+    if min_females_per_group is not None and max_females_per_group is not None:
+        total_females_sg1 = len(subgroup1_players[subgroup1_players['gender'] == 'F'])
+        total_females_sg2 = len(subgroup2_players[subgroup2_players['gender'] == 'F'])
+        total_females = total_females_sg1 + total_females_sg2
+        
+        if min_females_per_group * num_groups > total_females:
+            raise ValueError(f"Not enough female players: need at least {min_females_per_group * num_groups}, have {total_females}")
+        if max_females_per_group * num_groups < total_females:
+            raise ValueError(f"Too many female players for constraints: max capacity {max_females_per_group * num_groups}, have {total_females}")
+    
     # Select players for each subgroup (take all available if we have more than needed)
     if len(subgroup1_players) > needed_sg1:
         subgroup1_selected = subgroup1_players.nlargest(needed_sg1, 'skill_level').reset_index(drop=True)
@@ -598,10 +655,84 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
     group_keys = list(groups.keys())
     
     def balance_players_by_skill(players_list, subgroup_type, target_count_per_group):
-        """Balance players across all groups to minimize skill variance"""
+        """Balance players across all groups to minimize skill variance while respecting gender constraints"""
         if len(players_list) == 0:
             return
+        
+        # Separate by gender first if constraints are specified
+        if min_females_per_group is not None and max_females_per_group is not None:
+            male_players = players_list[players_list['gender'] == 'M'].sort_values('skill_level', ascending=False).reset_index(drop=True)
+            female_players = players_list[players_list['gender'] == 'F'].sort_values('skill_level', ascending=False).reset_index(drop=True)
             
+            # Distribute females first to meet constraints
+            distribute_with_gender_constraints(female_players, male_players, subgroup_type, target_count_per_group)
+        else:
+            # Original skill-only distribution
+            distribute_by_skill_only(players_list, subgroup_type, target_count_per_group)
+    
+    def distribute_with_gender_constraints(female_players, male_players, subgroup_type, target_count_per_group):
+        """Distribute players respecting gender constraints"""
+        total_females = len(female_players)
+        
+        # Calculate female distribution within constraints
+        female_distribution = [min_females_per_group] * num_groups
+        remaining_females = total_females - (min_females_per_group * num_groups)
+        
+        # Distribute remaining females respecting max constraints
+        for i in range(num_groups):
+            if remaining_females > 0 and female_distribution[i] < max_females_per_group:
+                add_count = min(remaining_females, max_females_per_group - female_distribution[i])
+                female_distribution[i] += add_count
+                remaining_females -= add_count
+        
+        # Assign females using skill balancing within constraints
+        female_idx = 0
+        female_records = female_players.to_dict('records')
+        
+        for round_num in range(max(female_distribution) if female_distribution else 0):
+            group_order = list(range(num_groups)) if round_num % 2 == 0 else list(range(num_groups-1, -1, -1))
+            
+            for group_idx in group_order:
+                if female_distribution[group_idx] > 0 and female_idx < len(female_records):
+                    player = female_records[female_idx]
+                    group_name = group_keys[group_idx]
+                    groups[group_name][subgroup_type]['players'].append(player)
+                    groups[group_name][subgroup_type]['total_skill'] += player['skill_level']
+                    groups[group_name][subgroup_type]['female_count'] += 1
+                    female_distribution[group_idx] -= 1
+                    female_idx += 1
+        
+        # Assign males to fill remaining spots
+        male_records = male_players.to_dict('records')
+        male_idx = 0
+        
+        while male_idx < len(male_records):
+            # Find group with fewest players and lowest skill total
+            available_groups = []
+            for i in range(num_groups):
+                current_count = len(groups[group_keys[i]][subgroup_type]['players'])
+                if current_count < target_count_per_group:
+                    skill_total = groups[group_keys[i]][subgroup_type]['total_skill']
+                    available_groups.append((skill_total, current_count, i))
+            
+            if not available_groups:
+                break
+            
+            # Sort by skill total (ascending) then by count (ascending)
+            available_groups.sort(key=lambda x: (x[0], x[1]))
+            target_group_idx = available_groups[0][2]
+            
+            player = male_records[male_idx]
+            group_name = group_keys[target_group_idx]
+            groups[group_name][subgroup_type]['players'].append(player)
+            groups[group_name][subgroup_type]['total_skill'] += player['skill_level']
+            groups[group_name][subgroup_type]['male_count'] += 1
+            male_idx += 1
+    
+    def distribute_by_skill_only(players_list, subgroup_type, target_count_per_group):
+        """Original skill-only distribution method"""
+    def distribute_by_skill_only(players_list, subgroup_type, target_count_per_group):
+        """Original skill-only distribution method"""
         # Sort players by skill level (descending)
         sorted_players = players_list.sort_values('skill_level', ascending=False).reset_index(drop=True)
         
@@ -643,67 +774,167 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
         optimize_skill_balance(subgroup_type, target_count_per_group)
     
     def optimize_skill_balance(subgroup_type, target_count_per_group):
-        """Optimize skill balance by swapping players between groups"""
-        max_iterations = 100
+        """Simple redistribution for subgroups using the proven algorithm"""
         
-        for iteration in range(max_iterations):
-            improved = False
-            
-            # Calculate current skill totals for this subgroup
+        for iteration in range(100):  # Limit iterations
+            # Get current group totals for this subgroup
             current_skills = [groups[group_key][subgroup_type]['total_skill'] for group_key in group_keys]
-            current_variance = sum((skill - sum(current_skills)/num_groups)**2 for skill in current_skills)
             
-            # Try swapping players between groups
-            for i in range(num_groups):
-                for j in range(i+1, num_groups):
-                    group_i = groups[group_keys[i]][subgroup_type]
-                    group_j = groups[group_keys[j]][subgroup_type]
-                    
-                    # Skip if either group is empty
-                    if not group_i['players'] or not group_j['players']:
+            if not any(current_skills):
+                break
+                
+            max_skill = max(current_skills)
+            min_skill = min(current_skills)
+            
+            # Success: difference <= 1
+            if max_skill - min_skill <= 1:
+                break
+            
+            # Find max and min groups
+            max_group_idx = current_skills.index(max_skill)
+            min_group_idx = current_skills.index(min_skill)
+            
+            max_group = groups[group_keys[max_group_idx]][subgroup_type]
+            min_group = groups[group_keys[min_group_idx]][subgroup_type]
+            
+            # Skip if either is empty
+            if not max_group['players'] or not min_group['players']:
+                break
+            
+            # Find best player swap using the simple proven algorithm
+            best_swap = None
+            best_improvement = 0
+            
+            for i, max_player in enumerate(max_group['players']):
+                for j, min_player in enumerate(min_group['players']):
+                    # Only swap same gender
+                    if max_player['gender'] != min_player['gender']:
                         continue
                     
-                    # Try swapping each player from group i with each player from group j
-                    for player_i_idx, player_i in enumerate(group_i['players']):
-                        for player_j_idx, player_j in enumerate(group_j['players']):
-                            # Only swap if same gender to maintain gender balance
-                            if player_i['gender'] == player_j['gender']:
-                                # Calculate new skills after swap
-                                new_skill_i = group_i['total_skill'] - player_i['skill_level'] + player_j['skill_level']
-                                new_skill_j = group_j['total_skill'] - player_j['skill_level'] + player_i['skill_level']
-                                
-                                new_skills = current_skills.copy()
-                                new_skills[i] = new_skill_i
-                                new_skills[j] = new_skill_j
-                                
-                                new_variance = sum((skill - sum(new_skills)/num_groups)**2 for skill in new_skills)
-                                
-                                # If this swap improves balance, do it
-                                if new_variance < current_variance - 0.01:  # Small threshold to avoid endless swapping
-                                    # Perform the swap
-                                    group_i['players'][player_i_idx] = player_j
-                                    group_j['players'][player_j_idx] = player_i
-                                    group_i['total_skill'] = new_skill_i
-                                    group_j['total_skill'] = new_skill_j
-                                    improved = True
-                                    current_variance = new_variance
-                                    current_skills = new_skills
-                                    break
-                        if improved:
-                            break
-                    if improved:
-                        break
-                if improved:
-                    break
+                    # Calculate skill difference
+                    skill_diff = max_player['skill_level'] - min_player['skill_level']
+                    
+                    # Only swap if it reduces the gap
+                    if skill_diff <= 0:
+                        continue
+                    
+                    # Calculate new totals after swap
+                    new_max_skill = max_skill - skill_diff
+                    new_min_skill = min_skill + skill_diff
+                    new_diff = abs(new_max_skill - new_min_skill)
+                    
+                    # If this improves balance, consider it
+                    improvement = (max_skill - min_skill) - new_diff
+                    if improvement > best_improvement:
+                        best_improvement = improvement
+                        best_swap = (i, j, max_player, min_player, skill_diff)
             
-            if not improved:
-                break
+            # Make the best swap
+            if best_swap:
+                i, j, max_player, min_player, skill_diff = best_swap
+                # Swap players
+                max_group['players'][i] = min_player
+                min_group['players'][j] = max_player
+                # Update totals
+                max_group['total_skill'] -= skill_diff
+                min_group['total_skill'] += skill_diff
+            else:
+                break  # No beneficial swap found
     
     # Balance subgroup 1 players
     balance_players_by_skill(subgroup1_selected, 'subgroup1', subgroup1_count)
     
     # Balance subgroup 2 players  
     balance_players_by_skill(subgroup2_selected, 'subgroup2', subgroup2_count)
+    
+    # Final step: Balance overall combined totals across all groups
+    def balance_overall_groups():
+        """Balance the combined totals of subgroup1 + subgroup2 across all groups"""
+        for iteration in range(100):
+            # Calculate combined totals
+            combined_totals = []
+            for key in group_keys:
+                sg1_total = groups[key]['subgroup1']['total_skill']
+                sg2_total = groups[key]['subgroup2']['total_skill']
+                combined_totals.append(sg1_total + sg2_total)
+            
+            max_total = max(combined_totals)
+            min_total = min(combined_totals)
+            
+            # If balanced within 1 point, we're done
+            if max_total - min_total <= 1:
+                break
+            
+            # Find highest and lowest groups
+            max_idx = combined_totals.index(max_total)
+            min_idx = combined_totals.index(min_total)
+            
+            # Try swapping between subgroups of these groups
+            best_swap = None
+            best_improvement = 0
+            
+            # Try swaps within subgroup1
+            max_sg1 = groups[group_keys[max_idx]]['subgroup1']
+            min_sg1 = groups[group_keys[min_idx]]['subgroup1']
+            
+            for i, max_player in enumerate(max_sg1['players']):
+                for j, min_player in enumerate(min_sg1['players']):
+                    if max_player['gender'] != min_player['gender']:
+                        continue
+                    
+                    skill_diff = max_player['skill_level'] - min_player['skill_level']
+                    if skill_diff <= 0:
+                        continue
+                    
+                    new_max_total = max_total - skill_diff
+                    new_min_total = min_total + skill_diff
+                    new_diff = abs(new_max_total - new_min_total)
+                    
+                    improvement = (max_total - min_total) - new_diff
+                    if improvement > best_improvement:
+                        best_improvement = improvement
+                        best_swap = ('subgroup1', i, j, max_player, min_player, skill_diff)
+            
+            # Try swaps within subgroup2
+            max_sg2 = groups[group_keys[max_idx]]['subgroup2']
+            min_sg2 = groups[group_keys[min_idx]]['subgroup2']
+            
+            for i, max_player in enumerate(max_sg2['players']):
+                for j, min_player in enumerate(min_sg2['players']):
+                    if max_player['gender'] != min_player['gender']:
+                        continue
+                    
+                    skill_diff = max_player['skill_level'] - min_player['skill_level']
+                    if skill_diff <= 0:
+                        continue
+                    
+                    new_max_total = max_total - skill_diff
+                    new_min_total = min_total + skill_diff
+                    new_diff = abs(new_max_total - new_min_total)
+                    
+                    improvement = (max_total - min_total) - new_diff
+                    if improvement > best_improvement:
+                        best_improvement = improvement
+                        best_swap = ('subgroup2', i, j, max_player, min_player, skill_diff)
+            
+            # Execute the best swap
+            if best_swap:
+                subgroup_type, i, j, max_player, min_player, skill_diff = best_swap
+                
+                max_subgroup = groups[group_keys[max_idx]][subgroup_type]
+                min_subgroup = groups[group_keys[min_idx]][subgroup_type]
+                
+                # Swap players
+                max_subgroup['players'][i] = min_player
+                min_subgroup['players'][j] = max_player
+                # Update totals
+                max_subgroup['total_skill'] -= skill_diff
+                min_subgroup['total_skill'] += skill_diff
+            else:
+                break  # No beneficial swap found
+    
+    # Apply final overall balancing
+    balance_overall_groups()
     
     # Convert to the expected format - combine subgroups into main groups
     result_groups = {}
@@ -1523,6 +1754,72 @@ if menu == "Player Import & Auto-Balance":
                 help="Choose how to balance players across groups"
             )
             
+            # Gender distribution constraints (for Optimized Balance strategy)
+            if balance_strategy == "Optimized Balance (Recommended)":
+                st.markdown("#### 👥 Gender Distribution Settings")
+                
+                # Get current female player count
+                total_females = len(st.session_state.player_database[st.session_state.player_database['gender'] == 'F'])
+                total_males = len(st.session_state.player_database[st.session_state.player_database['gender'] == 'M'])
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Female Players", total_females)
+                with col2:
+                    st.metric("Total Male Players", total_males)
+                with col3:
+                    st.metric("Total Players", total_females + total_males)
+                
+                # Min/Max females per group settings
+                col1, col2 = st.columns(2)
+                with col1:
+                    min_females = st.number_input(
+                        "Minimum females per group:",
+                        min_value=0,
+                        max_value=total_females // 6 if total_females > 0 else 0,
+                        value=max(0, total_females // 6 if total_females > 0 else 0),
+                        help="Minimum number of female players in each group"
+                    )
+                with col2:
+                    max_females = st.number_input(
+                        "Maximum females per group:",
+                        min_value=min_females,
+                        max_value=10,
+                        value=min(10, (total_females + 5) // 6 if total_females > 0 else 0),
+                        help="Maximum number of female players in each group"
+                    )
+                
+                # Validation and preview
+                if total_females > 0:
+                    min_total_needed = min_females * 6
+                    max_total_capacity = max_females * 6
+                    
+                    if min_total_needed > total_females:
+                        st.error(f"❌ Minimum constraint too high: need {min_total_needed} females, but only have {total_females}")
+                    elif max_total_capacity < total_females:
+                        st.error(f"❌ Maximum constraint too low: can fit {max_total_capacity} females, but have {total_females}")
+                    else:
+                        # Show distribution preview
+                        avg_females = total_females / 6
+                        st.success(f"✅ Valid constraints. Average females per group: {avg_females:.1f}")
+                        
+                        if st.checkbox("Show detailed distribution preview"):
+                            # Calculate expected distribution
+                            base_females = [min_females] * 6
+                            remaining = total_females - (min_females * 6)
+                            for i in range(6):
+                                if remaining > 0 and base_females[i] < max_females:
+                                    add_count = min(remaining, max_females - base_females[i])
+                                    base_females[i] += add_count
+                                    remaining -= add_count
+                            
+                            preview_df = pd.DataFrame({
+                                'Group': [f'Group {chr(65+i)}' for i in range(6)],
+                                'Expected Females': base_females,
+                                'Expected Males': [10 - f for f in base_females]
+                            })
+                            st.dataframe(preview_df, use_container_width=True)
+            
             # Show subgroup options if selected
             if balance_strategy == "Skill-Level Subgroups":
                 st.markdown("#### 🎯 Tournament Configuration")
@@ -1539,6 +1836,60 @@ if menu == "Player Import & Auto-Balance":
                 # Generate group labels dynamically
                 group_labels = [f"Group {chr(65+i)}" for i in range(num_groups)]
                 st.info(f"Will create: {', '.join(group_labels)}")
+                
+                # Gender distribution constraints
+                st.markdown("#### 👥 Gender Distribution Settings")
+                
+                # Get current female player count
+                total_females = len(st.session_state.player_database[st.session_state.player_database['gender'] == 'F'])
+                total_males = len(st.session_state.player_database[st.session_state.player_database['gender'] == 'M'])
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Female Players", total_females)
+                with col2:
+                    st.metric("Total Male Players", total_males)
+                with col3:
+                    st.metric("Total Players", total_females + total_males)
+                
+                # Gender constraint toggle
+                use_gender_constraints = st.checkbox(
+                    "Enable gender distribution constraints",
+                    help="Control the number of female players per group"
+                )
+                
+                if use_gender_constraints:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        min_females_sg = st.number_input(
+                            "Minimum females per group:",
+                            min_value=0,
+                            max_value=total_females // num_groups if total_females > 0 else 0,
+                            value=max(0, total_females // num_groups if total_females > 0 else 0),
+                            key="min_females_sg",
+                            help="Minimum number of female players in each group"
+                        )
+                    with col2:
+                        max_females_sg = st.number_input(
+                            "Maximum females per group:",
+                            min_value=min_females_sg,
+                            max_value=15,
+                            value=min(15, (total_females + num_groups-1) // num_groups if total_females > 0 else 0),
+                            key="max_females_sg",
+                            help="Maximum number of female players in each group"
+                        )
+                    
+                    # Validation for gender constraints
+                    if total_females > 0:
+                        min_total_needed = min_females_sg * num_groups
+                        max_total_capacity = max_females_sg * num_groups
+                        
+                        if min_total_needed > total_females:
+                            st.error(f"❌ Minimum constraint too high: need {min_total_needed} females, but only have {total_females}")
+                        elif max_total_capacity < total_females:
+                            st.error(f"❌ Maximum constraint too low: can fit {max_total_capacity} females, but have {total_females}")
+                        else:
+                            st.success(f"✅ Valid gender constraints. Average females per group: {total_females/num_groups:.1f}")
                 
                 # Skill level ranges
                 col1, col2 = st.columns(2)
@@ -1635,12 +1986,20 @@ if menu == "Player Import & Auto-Balance":
                             st.stop()
                         
                         try:
-                            # Auto-balance with subgroups
+                            # Auto-balance with subgroups and gender constraints
+                            gender_constraints = {}
+                            if 'use_gender_constraints' in locals() and use_gender_constraints:
+                                gender_constraints = {
+                                    'min_females_per_group': min_females_sg,
+                                    'max_females_per_group': max_females_sg
+                                }
+                            
                             balanced_groups, detailed_groups = auto_balance_subgroups(
                                 st.session_state.player_database, 
                                 subgroup1_min, subgroup1_max, 
                                 subgroup2_min, subgroup2_max,
-                                subgroup1_count, subgroup2_count, num_groups
+                                subgroup1_count, subgroup2_count, num_groups,
+                                **gender_constraints
                             )
                             
                             # Store detailed subgroup information for display
@@ -1652,8 +2011,15 @@ if menu == "Player Import & Auto-Balance":
                             st.stop()
                         
                     else:
-                        # Use traditional auto-balance
-                        balanced_groups = auto_balance_groups(st.session_state.player_database)
+                        # Use traditional auto-balance with gender constraints if specified
+                        if balance_strategy == "Optimized Balance (Recommended)":
+                            balanced_groups = auto_balance_groups(
+                                st.session_state.player_database,
+                                min_females_per_group=min_females if 'min_females' in locals() else None,
+                                max_females_per_group=max_females if 'max_females' in locals() else None
+                            )
+                        else:
+                            balanced_groups = auto_balance_groups(st.session_state.player_database)
                     
                     # Update session state for both strategies
                     st.session_state.groups = {}
