@@ -445,9 +445,14 @@ def auto_balance_groups(players_df, min_females_per_group=None, max_females_per_
     male_players = male_players.sort_values('skill_level', ascending=False).reset_index(drop=True)
     female_players = female_players.sort_values('skill_level', ascending=False).reset_index(drop=True)
     
-    # Initialize groups
-    groups = {f"Group {chr(65+i)}": {'players': [], 'total_skill': 0, 'male_count': 0, 'female_count': 0} for i in range(6)}
-    group_keys = list(groups.keys())
+    # Initialize groups using configured custom names
+    group_keys = [f"Group {chr(65+i)}" for i in range(6)]  # Default keys
+    if 'group_names' in st.session_state:
+        # Use the display names from configuration
+        groups = {key: {'players': [], 'total_skill': 0, 'male_count': 0, 'female_count': 0} for key in group_keys}
+    else:
+        groups = {f"Group {chr(65+i)}": {'players': [], 'total_skill': 0, 'male_count': 0, 'female_count': 0} for i in range(6)}
+        group_keys = list(groups.keys())
     
     # Step 1: Distribute females using user-defined constraints or default even distribution
     total_females = len(female_players)
@@ -643,10 +648,10 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
     else:
         subgroup2_selected = subgroup2_players.reset_index(drop=True)
     
-    # Initialize groups dynamically
+    # Initialize groups dynamically using default keys
     groups = {}
     for i in range(num_groups):
-        group_name = f"Group {chr(65+i)}"
+        group_name = f"Group {chr(65+i)}"  # Use default keys internally
         groups[group_name] = {
             'subgroup1': {'players': [], 'total_skill': 0, 'male_count': 0, 'female_count': 0},
             'subgroup2': {'players': [], 'total_skill': 0, 'male_count': 0, 'female_count': 0}
@@ -997,7 +1002,7 @@ def calculate_standings():
             total_points += legacy_points
         
         standings_data.append({
-            'Team': group_name,
+            'Team': st.session_state.group_names.get(group_name, group_name),
             'Wins': wins,
             'Losses': losses,
             'Points': total_points,
@@ -1015,11 +1020,14 @@ def record_new_clash():
     """Function to handle new clash recording"""
     col1, col2 = st.columns(2)
     with col1:
-        # Display group names with their proper names
-        group_options = list(st.session_state.groups.keys())
-        g1 = st.selectbox("Select Group 1", group_options, index=0, key="new_clash_g1")
+        # Display group names with their custom names
+        group_options = [st.session_state.group_names.get(key, key) for key in st.session_state.groups.keys()]
+        group_keys = list(st.session_state.groups.keys())
+        g1_display = st.selectbox("Select Group 1", group_options, index=0, key="new_clash_g1")
+        g1 = group_keys[group_options.index(g1_display)]
     with col2:
-        g2 = st.selectbox("Select Group 2", group_options, index=1 if len(group_options) > 1 else 0, key="new_clash_g2")
+        g2_display = st.selectbox("Select Group 2", group_options, index=1 if len(group_options) > 1 else 0, key="new_clash_g2")
+        g2 = group_keys[group_options.index(g2_display)]
 
     if g1 == g2:
         st.error("Please select two different groups.")
@@ -2040,7 +2048,7 @@ if menu == "Player Import & Auto-Balance":
                     
                     # Update standings to include new groups
                     st.session_state.standings = pd.DataFrame({
-                        "Group": list(st.session_state.groups.keys()),
+                        "Group": [st.session_state.group_names.get(key, key) for key in st.session_state.groups.keys()],
                         "Clash Wins": [0] * len(st.session_state.groups),
                         "Total Points": [0] * len(st.session_state.groups)
                     }).set_index("Group")
@@ -2073,7 +2081,7 @@ if menu == "Player Import & Auto-Balance":
                         group_player_details[group_name] = group_players_df.sort_values('skill_level', ascending=False)
                         
                         stats = {
-                            'Group': group_name,
+                            'Group': st.session_state.group_names.get(group_name, group_name),
                             'Players': len(group_players_df),
                             'Males': len(group_players_df[group_players_df['gender'] == 'M']),
                             'Females': len(group_players_df[group_players_df['gender'] == 'F']),
@@ -2117,7 +2125,7 @@ if menu == "Player Import & Auto-Balance":
                         sg1_players = subgroups['subgroup1']['players']
                         if sg1_players:
                             sg1_stats = {
-                                'Group': f"{group_name}-1",
+                                'Group': f"{st.session_state.group_names.get(group_name, group_name)}-1",
                                 'Subgroup': '1 (Lower)',
                                 'Players': len(sg1_players),
                                 'Males': subgroups['subgroup1']['male_count'],
@@ -2132,7 +2140,7 @@ if menu == "Player Import & Auto-Balance":
                         sg2_players = subgroups['subgroup2']['players']
                         if sg2_players:
                             sg2_stats = {
-                                'Group': f"{group_name}-2",
+                                'Group': f"{st.session_state.group_names.get(group_name, group_name)}-2",
                                 'Subgroup': '2 (Higher)',
                                 'Players': len(sg2_players),
                                 'Males': subgroups['subgroup2']['male_count'],
@@ -2833,7 +2841,7 @@ elif menu == "Match Schedule":
             if schedule_type == "Round Robin (All groups play each other)":
                 with st.spinner("Generating optimized schedule..."):
                     schedule = generate_round_robin_schedule(
-                        list(st.session_state.groups.keys()),
+                        [st.session_state.group_names.get(key, key) for key in st.session_state.groups.keys()],
                         tournament_dates,
                         start_time,
                         end_time,
@@ -3124,7 +3132,7 @@ elif menu == "Manage Players":
                 for group_name, players in st.session_state.groups.items():
                     for i, player in enumerate(players, 1):
                         group_data.append({
-                            'Group': group_name,
+                            'Group': st.session_state.group_names.get(group_name, group_name),
                             'Position': i,
                             'Player': player
                         })
