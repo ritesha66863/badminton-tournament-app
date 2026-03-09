@@ -142,7 +142,9 @@ def save_tournament_data():
         # Save other data including users
         tournament_data = {
             'group_names': st.session_state.get('group_names', {}),
+            'subgroup_names': st.session_state.get('subgroup_names', {}),
             'groups': st.session_state.get('groups', {}),
+            'detailed_groups': st.session_state.get('detailed_groups', {}),
             'standings': st.session_state.get('standings', pd.DataFrame()).to_dict() if 'standings' in st.session_state else {},
             'tournament_data': st.session_state.get('tournament_data', {}),
             'users': st.session_state.get('users', {}),
@@ -177,7 +179,9 @@ def load_tournament_data():
             with open('tournament_data.json', 'r') as f:
                 tournament_data = json.load(f)
                 st.session_state.group_names = tournament_data.get('group_names', {f"Group {chr(65+i)}": f"Group {chr(65+i)}" for i in range(6)})
+                st.session_state.subgroup_names = tournament_data.get('subgroup_names', {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'})
                 st.session_state.groups = tournament_data.get('groups', {})
+                st.session_state.detailed_groups = tournament_data.get('detailed_groups', {})
                 st.session_state.tournament_data = tournament_data.get('tournament_data', {})
                 st.session_state.clash_edit_history = tournament_data.get('clash_edit_history', [])
                 
@@ -194,9 +198,17 @@ def load_tournament_data():
                     st.session_state.standings = pd.DataFrame.from_dict(standings_data)
                     if 'Group' in st.session_state.standings.columns:
                         st.session_state.standings = st.session_state.standings.set_index('Group')
+                else:
+                    # Initialize default standings if none exist
+                    st.session_state.standings = pd.DataFrame({
+                        "Group": [f"Group {chr(65+i)}" for i in range(6)],
+                        "Clash Wins": [0]*6,
+                        "Total Points": [0]*6
+                    }).set_index("Group")
         except:
             # Initialize defaults if file doesn't exist
             st.session_state.group_names = {f"Group {chr(65+i)}": f"Group {chr(65+i)}" for i in range(6)}
+            st.session_state.subgroup_names = {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'}
             st.session_state.groups = {f"Group {chr(65+i)}": [] for i in range(6)}
             st.session_state.users = {}  # Initialize empty users dict
             st.session_state.clash_edit_history = []  # Initialize empty history
@@ -343,6 +355,13 @@ def generate_round_robin_schedule(groups, dates, start_time, end_time, num_court
 if 'initialized' not in st.session_state:
     # Load existing data first (including users)
     load_tournament_data()
+    
+    # Ensure subgroup names are always initialized
+    if 'subgroup_names' not in st.session_state:
+        st.session_state.subgroup_names = {
+            'subgroup1': '1 (Lower)',
+            'subgroup2': '2 (Higher)'
+        }
     
     # Then initialize user system (will only add missing default users)
     initialize_users()
@@ -1902,12 +1921,14 @@ if menu == "Player Import & Auto-Balance":
                 # Skill level ranges
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.markdown("**Subgroup 1 (Lower Skills)**")
+                    subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                    st.markdown(f"**{subgroup1_name}**")
                     subgroup1_min = st.number_input("Min Skill Level:", min_value=1, max_value=10, value=1, key="sg1_min")
                     subgroup1_max = st.number_input("Max Skill Level:", min_value=1, max_value=10, value=5, key="sg1_max")
                     
                 with col2:
-                    st.markdown("**Subgroup 2 (Higher Skills)**")
+                    subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                    st.markdown(f"**{subgroup2_name}**")
                     subgroup2_min = st.number_input("Min Skill Level:", min_value=1, max_value=10, value=6, key="sg2_min")
                     subgroup2_max = st.number_input("Max Skill Level:", min_value=1, max_value=10, value=10, key="sg2_max")
                 
@@ -1918,17 +1939,17 @@ if menu == "Player Import & Auto-Balance":
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     subgroup1_count = st.number_input(
-                        "Players per Subgroup 1:", 
+                        f"Players per {subgroup1_name}:", 
                         min_value=1, max_value=15, value=5, 
                         key="sg1_count",
-                        help=f"Number of players in each subgroup 1 across {num_groups} groups"
+                        help=f"Number of players in each {subgroup1_name.lower()} across {num_groups} groups"
                     )
                 with col2:
                     subgroup2_count = st.number_input(
-                        "Players per Subgroup 2:", 
+                        f"Players per {subgroup2_name}:", 
                         min_value=1, max_value=15, value=5, 
                         key="sg2_count",
-                        help=f"Number of players in each subgroup 2 across {num_groups} groups"
+                        help=f"Number of players in each {subgroup2_name.lower()} across {num_groups} groups"
                     )
                 with col3:
                     total_per_group = subgroup1_count + subgroup2_count
@@ -1937,7 +1958,7 @@ if menu == "Player Import & Auto-Balance":
                 
                 # Validate ranges
                 if subgroup1_max >= subgroup2_min:
-                    st.warning("⚠️ Subgroup ranges should not overlap. Adjust the ranges so Subgroup 1 max is less than Subgroup 2 min.")
+                    st.warning(f"⚠️ Subgroup ranges should not overlap. Adjust the ranges so {subgroup1_name} max is less than {subgroup2_name} min.")
                 
                 # Show preview of player distribution
                 if st.button("🔍 Preview Player Distribution"):
@@ -2117,7 +2138,9 @@ if menu == "Player Import & Auto-Balance":
                 if hasattr(st.session_state, 'detailed_groups') and st.session_state.detailed_groups:
                     st.divider()
                     st.subheader("🎯 Subgroup Distribution Analysis")
-                    st.info("Breakdown of players by skill-level subgroups within each group")
+                    subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                    subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                    st.info(f"Breakdown of players by skill-level subgroups ({subgroup1_name} & {subgroup2_name}) within each group")
                     
                     subgroup_data = []
                     for group_name, subgroups in st.session_state.detailed_groups.items():
@@ -2125,8 +2148,8 @@ if menu == "Player Import & Auto-Balance":
                         sg1_players = subgroups['subgroup1']['players']
                         if sg1_players:
                             sg1_stats = {
-                                'Group': f"{st.session_state.group_names.get(group_name, group_name)}-1",
-                                'Subgroup': '1 (Lower)',
+                                'Group': f"{st.session_state.group_names.get(group_name, group_name)} - {st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')}",
+                                'Subgroup': st.session_state.subgroup_names.get('subgroup1', '1 (Lower)'),
                                 'Players': len(sg1_players),
                                 'Males': subgroups['subgroup1']['male_count'],
                                 'Females': subgroups['subgroup1']['female_count'],
@@ -2140,8 +2163,8 @@ if menu == "Player Import & Auto-Balance":
                         sg2_players = subgroups['subgroup2']['players']
                         if sg2_players:
                             sg2_stats = {
-                                'Group': f"{st.session_state.group_names.get(group_name, group_name)}-2",
-                                'Subgroup': '2 (Higher)',
+                                'Group': f"{st.session_state.group_names.get(group_name, group_name)} - {st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')}",
+                                'Subgroup': st.session_state.subgroup_names.get('subgroup2', '2 (Higher)'),
                                 'Players': len(sg2_players),
                                 'Males': subgroups['subgroup2']['male_count'],
                                 'Females': subgroups['subgroup2']['female_count'],
@@ -2156,13 +2179,16 @@ if menu == "Player Import & Auto-Balance":
                         st.dataframe(subgroup_df, use_container_width=True)
                         
                         # Subgroup balance metrics
-                        sg1_data = [row for row in subgroup_data if '1 (Lower)' in row['Subgroup']]
-                        sg2_data = [row for row in subgroup_data if '2 (Higher)' in row['Subgroup']]
+                        subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                        subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                        
+                        sg1_data = [row for row in subgroup_data if subgroup1_name in row['Subgroup']]
+                        sg2_data = [row for row in subgroup_data if subgroup2_name in row['Subgroup']]
                         
                         if sg1_data and sg2_data:
                             col1, col2 = st.columns(2)
                             with col1:
-                                st.markdown("**Subgroup 1 Balance**")
+                                st.markdown(f"**{subgroup1_name} Balance**")
                                 sg1_df = pd.DataFrame(sg1_data)
                                 sg1_variance = sg1_df['Total Skill'].var()
                                 sg1_range = sg1_df['Total Skill'].max() - sg1_df['Total Skill'].min()
@@ -2170,7 +2196,7 @@ if menu == "Player Import & Auto-Balance":
                                 st.metric("Skill Range", f"{sg1_range}")
                                 
                             with col2:
-                                st.markdown("**Subgroup 2 Balance**")
+                                st.markdown(f"**{subgroup2_name} Balance**")
                                 sg2_df = pd.DataFrame(sg2_data)
                                 sg2_variance = sg2_df['Total Skill'].var()
                                 sg2_range = sg2_df['Total Skill'].max() - sg2_df['Total Skill'].min()
@@ -2183,51 +2209,69 @@ if menu == "Player Import & Auto-Balance":
                 
                 # Create tabs for each group
                 if group_player_details:
-                    group_tabs = st.tabs([f"{group_name} ({balance_df[balance_df['Group']==group_name]['Total Skill'].iloc[0]} pts)" for group_name in group_player_details.keys()])
+                    # Create tabs with group display names and skill points
+                    tab_labels = []
+                    for group_name in group_player_details.keys():
+                        display_name = st.session_state.group_names.get(group_name, group_name)
+                        # Find matching balance data by display name
+                        matching_balance = balance_df[balance_df['Group'] == display_name]
+                        if not matching_balance.empty:
+                            total_skill = matching_balance['Total Skill'].iloc[0]
+                            tab_labels.append(f"{display_name} ({total_skill} pts)")
+                        else:
+                            tab_labels.append(display_name)
+                    
+                    group_tabs = st.tabs(tab_labels)
                     
                     for tab, (group_name, players_df) in zip(group_tabs, group_player_details.items()):
                         with tab:
-                            # Group statistics
-                            group_stats = balance_data[next(i for i, x in enumerate(balance_data) if x['Group'] == group_name)]
+                            # Group statistics - use display name to find balance data
+                            display_name = st.session_state.group_names.get(group_name, group_name)
+                            group_stats = next((x for x in balance_data if x['Group'] == display_name), None)
                             
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("Total Players", group_stats['Players'])
-                            with col2:
-                                st.metric("Males/Females", f"{group_stats['Males']}/{group_stats['Females']}")
-                            with col3:
-                                st.metric("Average Skill", group_stats['Avg Skill'])
-                            with col4:
-                                st.metric("Total Skill Points", group_stats['Total Skill'])
-                            
-                            # Player list with details
-                            st.markdown("**Players:**")
-                            
-                            # Show subgroup breakdown if available
-                            if hasattr(st.session_state, 'detailed_groups') and st.session_state.detailed_groups and group_name in st.session_state.detailed_groups:
-                                subgroups = st.session_state.detailed_groups[group_name]
+                            if group_stats:
+                                col1, col2, col3, col4 = st.columns(4)
+                                with col1:
+                                    st.metric("Total Players", group_stats['Players'])
+                                with col2:
+                                    st.metric("Males/Females", f"{group_stats['Males']}/{group_stats['Females']}")
+                                with col3:
+                                    st.metric("Average Skill", group_stats['Avg Skill'])
+                                with col4:
+                                    st.metric("Total Skill Points", group_stats['Total Skill'])
                                 
-                                # Subgroup 1
-                                if subgroups['subgroup1']['players']:
-                                    st.markdown(f"***🔽 Subgroup 1 - Lower Skills ({len(subgroups['subgroup1']['players'])} players)***")
-                                    for idx, player in enumerate(subgroups['subgroup1']['players'], 1):
-                                        gender_icon = "👨" if player['gender'] == 'M' else "👩"
-                                        skill_stars = "⭐" * min(player['skill_level'], 5)
-                                        st.write(f"  {idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                # Player list with details
+                                st.markdown("**Players:**")
                                 
-                                # Subgroup 2
-                                if subgroups['subgroup2']['players']:
-                                    st.markdown(f"***🔼 Subgroup 2 - Higher Skills ({len(subgroups['subgroup2']['players'])} players)***")
-                                    for idx, player in enumerate(subgroups['subgroup2']['players'], 1):
+                                # Show subgroup breakdown if available
+                                if hasattr(st.session_state, 'detailed_groups') and st.session_state.detailed_groups and group_name in st.session_state.detailed_groups:
+                                    subgroups = st.session_state.detailed_groups[group_name]
+                                    
+                                    # Subgroup 1
+                                    if subgroups['subgroup1']['players']:
+                                        subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                                        st.markdown(f"***🔽 {subgroup1_name} ({len(subgroups['subgroup1']['players'])} players)***")
+                                        for idx, player in enumerate(subgroups['subgroup1']['players'], 1):
+                                            gender_icon = "👨" if player['gender'] == 'M' else "👩"
+                                            skill_stars = "⭐" * min(player['skill_level'], 5)
+                                            st.write(f"  {idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                    
+                                    # Subgroup 2
+                                    if subgroups['subgroup2']['players']:
+                                        subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                                        st.markdown(f"***🔼 {subgroup2_name} ({len(subgroups['subgroup2']['players'])} players)***")
+                                        for idx, player in enumerate(subgroups['subgroup2']['players'], 1):
+                                            gender_icon = "👨" if player['gender'] == 'M' else "👩"
+                                            skill_stars = "⭐" * min(player['skill_level'], 10)
+                                            st.write(f"  {idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                else:
+                                    # Regular display without subgroups
+                                    for idx, (_, player) in enumerate(players_df.iterrows(), 1):
                                         gender_icon = "👨" if player['gender'] == 'M' else "👩"
                                         skill_stars = "⭐" * min(player['skill_level'], 10)
-                                        st.write(f"  {idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                        st.write(f"{idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
                             else:
-                                # Regular display without subgroups
-                                for idx, (_, player) in enumerate(players_df.iterrows(), 1):
-                                    gender_icon = "👨" if player['gender'] == 'M' else "👩"
-                                    skill_stars = "⭐" * min(player['skill_level'], 10)
-                                    st.write(f"{idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                st.warning(f"No balance data found for {display_name}")
                 
                 # Summary statistics
                 st.divider()
@@ -2283,14 +2327,62 @@ elif menu == "Setup Groups & Players":
                 old_key = group_key
                 st.session_state.group_names[old_key] = new_name
                 
-                # Update groups dictionary with new name
-                if old_key in st.session_state.groups:
-                    st.session_state.groups[new_name] = st.session_state.groups.pop(old_key)
+                # Update groups dictionary with new name if it exists
+                if hasattr(st.session_state, 'groups') and st.session_state.groups is not None:
+                    if old_key in st.session_state.groups:
+                        st.session_state.groups[new_name] = st.session_state.groups.pop(old_key)
                 
-                # Update standings dataframe
-                if old_key in st.session_state.standings.index:
-                    st.session_state.standings = st.session_state.standings.rename(index={old_key: new_name})
+                # Update standings dataframe if it exists
+                if hasattr(st.session_state, 'standings') and st.session_state.standings is not None:
+                    if old_key in st.session_state.standings.index:
+                        st.session_state.standings = st.session_state.standings.rename(index={old_key: new_name})
+                
+                # Auto-save configuration changes
+                auto_save()
     
+    # Subgroup Names Configuration
+    st.subheader("🏷️ Subgroup Names Configuration")
+    st.info("Define names for subgroups used in 'Skill-Level Subgroups' balance strategy (e.g., 'Defenders', 'Attackers' or 'Juniors', 'Seniors')")
+    
+    # Initialize subgroup names if not exists
+    if 'subgroup_names' not in st.session_state:
+        st.session_state.subgroup_names = {
+            'subgroup1': '1 (Lower)',
+            'subgroup2': '2 (Higher)'
+        }
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        subgroup1_name = st.text_input(
+            "Subgroup 1 Name (Lower Skills):", 
+            value=st.session_state.subgroup_names['subgroup1'], 
+            key="subgroup1_name",
+            help="This name will be used for the lower skill subgroup across all groups"
+        )
+        if subgroup1_name.strip() and subgroup1_name != st.session_state.subgroup_names['subgroup1']:
+            st.session_state.subgroup_names['subgroup1'] = subgroup1_name.strip()
+            auto_save()  # Auto-save subgroup name changes
+    
+    with col2:
+        subgroup2_name = st.text_input(
+            "Subgroup 2 Name (Higher Skills):", 
+            value=st.session_state.subgroup_names['subgroup2'], 
+            key="subgroup2_name",
+            help="This name will be used for the higher skill subgroup across all groups"
+        )
+        if subgroup2_name.strip() and subgroup2_name != st.session_state.subgroup_names['subgroup2']:
+            st.session_state.subgroup_names['subgroup2'] = subgroup2_name.strip()
+            auto_save()  # Auto-save subgroup name changes
+
+    # Save confirmation section
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("💾 Save All Names Configuration", type="primary", use_container_width=True):
+            auto_save()
+            st.success("✅ All group and subgroup names saved successfully!")
+            st.balloons()
+
     st.divider()
     
     # Players Setup
@@ -2381,6 +2473,16 @@ elif menu == "Team Details":
     st.header("👥 Team Details & Subgroup Breakdown")
     st.markdown("Detailed view of all teams with player distribution")
     
+    # Debug info at top (can be hidden with expander)
+    with st.expander("🔧 Debug Info", expanded=False):
+        st.write("**Groups exist:**", bool(st.session_state.groups))
+        st.write("**Groups have players:**", any(st.session_state.groups.values()) if st.session_state.groups else False)
+        st.write("**Detailed groups exist:**", hasattr(st.session_state, 'detailed_groups'))
+        if hasattr(st.session_state, 'detailed_groups'):
+            st.write("**Detailed groups populated:**", bool(st.session_state.detailed_groups))
+            if st.session_state.detailed_groups:
+                st.write("**Detailed groups keys:**", list(st.session_state.detailed_groups.keys()))
+    
     if not st.session_state.groups or not any(st.session_state.groups.values()):
         st.info("📝 No teams have been created yet. Please go to 'Player Import & Auto-Balance' to create teams first.")
     else:
@@ -2390,6 +2492,12 @@ elif menu == "Team Details":
         if has_subgroups:
             st.success("🎯 **Skill-Level Subgroups Active** - Teams are organized by skill ranges")
             
+            # More prominent subgroup info
+            subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+            subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+            
+            st.info(f"📋 **Your Subgroups:** {subgroup1_name} and {subgroup2_name}")
+            
             # Subgroup summary
             st.subheader("📊 Subgroup Overview")
             subgroup_summary = []
@@ -2398,14 +2506,17 @@ elif menu == "Team Details":
                 sg1_data = subgroups['subgroup1']
                 sg2_data = subgroups['subgroup2']
                 
+                # Use custom group name for display
+                display_group_name = st.session_state.group_names.get(group_name, group_name)
+                
                 summary = {
-                    'Group': group_name,
-                    'SG1 Players': len(sg1_data['players']),
-                    'SG1 Males': sg1_data['male_count'],
-                    'SG1 Females': sg1_data['female_count'],
-                    'SG2 Players': len(sg2_data['players']),
-                    'SG2 Males': sg2_data['male_count'], 
-                    'SG2 Females': sg2_data['female_count'],
+                    'Group': display_group_name,
+                    f'{subgroup1_name} Players': len(sg1_data['players']),
+                    f'{subgroup1_name} Males': sg1_data['male_count'],
+                    f'{subgroup1_name} Females': sg1_data['female_count'],
+                    f'{subgroup2_name} Players': len(sg2_data['players']),
+                    f'{subgroup2_name} Males': sg2_data['male_count'], 
+                    f'{subgroup2_name} Females': sg2_data['female_count'],
                     'Total Players': len(sg1_data['players']) + len(sg2_data['players'])
                 }
                 subgroup_summary.append(summary)
@@ -2415,14 +2526,17 @@ elif menu == "Team Details":
             st.dataframe(summary_df, use_container_width=True)
             
             # Detailed team breakdown
-            st.subheader("🔍 Detailed Team Breakdown")
+            st.subheader("🔍 Detailed Team Breakdown by Subgroups")
+            st.info(f"Click on each team tab to see players organized by {subgroup1_name} and {subgroup2_name}")
             
-            # Create tabs for each group
-            group_tabs = st.tabs([f"{group_name}" for group_name in st.session_state.detailed_groups.keys()])
+            # Create tabs for each group using custom names
+            group_display_names = [st.session_state.group_names.get(group_name, group_name) for group_name in st.session_state.detailed_groups.keys()]
+            group_tabs = st.tabs(group_display_names)
             
             for tab, (group_name, subgroups) in zip(group_tabs, st.session_state.detailed_groups.items()):
                 with tab:
-                    st.markdown(f"### {group_name} - Complete Roster")
+                    display_group_name = st.session_state.group_names.get(group_name, group_name)
+                    st.markdown(f"### {display_group_name} - Complete Roster")
                     
                     # Group statistics
                     total_players = len(subgroups['subgroup1']['players']) + len(subgroups['subgroup2']['players'])
@@ -2437,12 +2551,14 @@ elif menu == "Team Details":
                     with col3:
                         st.metric("Females", total_females)
                     
-                    # Subgroup breakdown
+                    # Subgroup breakdown with enhanced display
+                    st.markdown("---")
+                    st.markdown(f"### 🎯 Subgroup Organization")
                     col1, col2 = st.columns(2)
                     
                     # Subgroup 1
                     with col1:
-                        st.markdown("#### 🔽 Subgroup 1")
+                        st.markdown(f"#### 🔽 {subgroup1_name}")
                         sg1_players = subgroups['subgroup1']['players']
                         if sg1_players:
                             sg1_metrics_col1, sg1_metrics_col2 = st.columns(2)
@@ -2452,16 +2568,16 @@ elif menu == "Team Details":
                             with sg1_metrics_col2:
                                 st.metric("Females", subgroups['subgroup1']['female_count'])
                             
-                            st.markdown("**Players:**")
+                            st.markdown("**🏸 Players:**")
                             for i, player in enumerate(sg1_players, 1):
                                 gender_icon = "👨" if player['gender'] == 'M' else "👩"
                                 st.write(f"{i}. {gender_icon} **{player['name']}**")
                         else:
-                            st.info("No players in Subgroup 1")
+                            st.info(f"No players in {subgroup1_name}")
                     
                     # Subgroup 2
                     with col2:
-                        st.markdown("#### 🔼 Subgroup 2")
+                        st.markdown(f"#### 🔼 {subgroup2_name}")
                         sg2_players = subgroups['subgroup2']['players']
                         if sg2_players:
                             sg2_metrics_col1, sg2_metrics_col2 = st.columns(2)
@@ -2471,15 +2587,26 @@ elif menu == "Team Details":
                             with sg2_metrics_col2:
                                 st.metric("Females", subgroups['subgroup2']['female_count'])
                             
-                            st.markdown("**Players:**")
+                            st.markdown("**🏸 Players:**")
                             for i, player in enumerate(sg2_players, 1):
                                 gender_icon = "👨" if player['gender'] == 'M' else "👩"
                                 st.write(f"{i}. {gender_icon} **{player['name']}**")
                         else:
-                            st.info("No players in Subgroup 2")
+                            st.info(f"No players in {subgroup2_name}")
         
         else:
             st.info("🎯 **Standard Groups** - Teams created without skill-level subgroups")
+            
+            # Add instructions for getting subgroups
+            with st.expander("💡 Want to see teams organized by skill subgroups?", expanded=False):
+                st.markdown("""
+                To see players organized by skill subgroups:
+                1. Go to **'Player Import & Auto-Balance'** tab
+                2. Select **'Skill-Level Subgroups'** balance strategy
+                3. Configure your skill ranges and subgroup names
+                4. Create balanced groups
+                5. Return to this page to see subgroup organization
+                """)
             
             # Standard group display
             st.subheader("👥 Team Roster")
@@ -2495,7 +2622,7 @@ elif menu == "Team Details":
                     
                     if not group_players_df.empty:
                         summary = {
-                            'Group': group_name,
+                            'Group': st.session_state.group_names.get(group_name, group_name),
                             'Total Players': len(group_players_df),
                             'Males': len(group_players_df[group_players_df['gender'] == 'M']),
                             'Females': len(group_players_df[group_players_df['gender'] == 'F'])
@@ -2509,11 +2636,12 @@ elif menu == "Team Details":
             # Detailed team breakdown
             st.subheader("🔍 Detailed Team Breakdown")
             
-            group_tabs = st.tabs([group_name for group_name in st.session_state.groups.keys()])
+            group_tabs = st.tabs([st.session_state.group_names.get(group_name, group_name) for group_name in st.session_state.groups.keys()])
             
             for tab, (group_name, players) in zip(group_tabs, st.session_state.groups.items()):
                 with tab:
-                    st.markdown(f"### {group_name} - Complete Roster")
+                    display_group_name = st.session_state.group_names.get(group_name, group_name)
+                    st.markdown(f"### {display_group_name} - Complete Roster")
                     
                     if players:
                         # Get player details
@@ -2544,16 +2672,6 @@ elif menu == "Team Details":
                     else:
                         st.info("No players assigned to this group")
         
-        # Debug information (temporary - to help troubleshoot subgroups)
-        with st.expander("🔧 Debug Info", expanded=False):
-            st.write("**Session State Keys:**", list(st.session_state.keys()))
-            if hasattr(st.session_state, 'detailed_groups'):
-                st.write("**Detailed Groups Found:**", bool(st.session_state.detailed_groups))
-                if st.session_state.detailed_groups:
-                    st.write("**Detailed Groups Keys:**", list(st.session_state.detailed_groups.keys()))
-            else:
-                st.write("**Detailed Groups:**", "Not found in session state")
-        
         # Export functionality
         st.divider()
         st.subheader("📥 Export Team Details")
@@ -2583,12 +2701,16 @@ elif menu == "Team Details":
                 detailed_roster = []
                 
                 if has_subgroups:
+                    subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                    subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                    
                     for group_name, subgroups in st.session_state.detailed_groups.items():
-                        for sg_type, sg_data in [('Subgroup1', subgroups['subgroup1']), ('Subgroup2', subgroups['subgroup2'])]:
+                        display_group_name = st.session_state.group_names.get(group_name, group_name)
+                        for sg_type, sg_data, sg_name in [('subgroup1', subgroups['subgroup1'], subgroup1_name), ('subgroup2', subgroups['subgroup2'], subgroup2_name)]:
                             for player in sg_data['players']:
                                 detailed_roster.append({
-                                    'Group': group_name,
-                                    'Subgroup': sg_type,
+                                    'Group': display_group_name,
+                                    'Subgroup': sg_name,
                                     'Player': player['name'],
                                     'Gender': player['gender'],
                                     'Email': player.get('email', '')
