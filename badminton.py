@@ -139,20 +139,28 @@ def save_tournament_data():
         if 'player_database' in st.session_state:
             st.session_state.player_database.to_json('tournament_players.json', orient='records')
         
-        # Save other data including users
+        # Ensure standings is a proper dataframe before saving
+        standings_to_save = {}
+        if 'standings' in st.session_state and not st.session_state.standings.empty:
+            try:
+                standings_to_save = st.session_state.standings.to_dict('index')
+            except Exception as e:
+                st.warning(f"Warning: Could not save standings properly: {str(e)}")
+        
+        # Save other data including users (excluding matches - they have their own file now)
         tournament_data = {
             'group_names': st.session_state.get('group_names', {}),
             'subgroup_names': st.session_state.get('subgroup_names', {}),
             'groups': st.session_state.get('groups', {}),
             'detailed_groups': st.session_state.get('detailed_groups', {}),
-            'standings': st.session_state.get('standings', pd.DataFrame()).to_dict() if 'standings' in st.session_state else {},
-            'tournament_data': st.session_state.get('tournament_data', {}),
+            'standings': standings_to_save,
+            'tournament_data': st.session_state.get('tournament_data', {}),  # Keep for backward compatibility
             'users': st.session_state.get('users', {}),
             'clash_edit_history': st.session_state.get('clash_edit_history', [])
         }
         
         with open('tournament_data.json', 'w') as f:
-            json.dump(tournament_data, f)
+            json.dump(tournament_data, f, indent=2)
             
     except Exception as e:
         st.error(f"Error saving data: {str(e)}")
@@ -178,11 +186,18 @@ def load_tournament_data():
         try:
             with open('tournament_data.json', 'r') as f:
                 tournament_data = json.load(f)
-                st.session_state.group_names = tournament_data.get('group_names', {f"Group {chr(65+i)}": f"Group {chr(65+i)}" for i in range(6)})
+                
+                # Default group setup for consistency
+                default_groups = [f"Group {chr(65+i)}" for i in range(6)]
+                default_names = ["Warriors", "Champions", "Legends", "Heroes", "Titans", "Gladiators"]
+                
+                st.session_state.group_names = tournament_data.get('group_names', {group: name for group, name in zip(default_groups, default_names)})
                 st.session_state.subgroup_names = tournament_data.get('subgroup_names', {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'})
-                st.session_state.groups = tournament_data.get('groups', {})
+                st.session_state.groups = tournament_data.get('groups', {group: [] for group in default_groups})
                 st.session_state.detailed_groups = tournament_data.get('detailed_groups', {})
                 st.session_state.tournament_data = tournament_data.get('tournament_data', {})
+                # Load individual matches from separate file
+                load_matches()
                 st.session_state.clash_edit_history = tournament_data.get('clash_edit_history', [])
                 
                 # Load users first before other initialization
@@ -195,36 +210,158 @@ def load_tournament_data():
                 # Restore standings
                 standings_data = tournament_data.get('standings', {})
                 if standings_data:
-                    st.session_state.standings = pd.DataFrame.from_dict(standings_data)
-                    if 'Group' in st.session_state.standings.columns:
-                        st.session_state.standings = st.session_state.standings.set_index('Group')
+                    try:
+                        # Try to load from indexed format first (new format)
+                        st.session_state.standings = pd.DataFrame.from_dict(standings_data, orient='index')
+                    except:
+                        # Fallback to old format if needed
+                        st.session_state.standings = pd.DataFrame.from_dict(standings_data)
+                        if 'Group' in st.session_state.standings.columns:
+                            st.session_state.standings = st.session_state.standings.set_index('Group')
                 else:
-                    # Initialize default standings if none exist
-                    st.session_state.standings = pd.DataFrame({
-                        "Group": [f"Group {chr(65+i)}" for i in range(6)],
-                        "Clash Wins": [0]*6,
-                        "Total Points": [0]*6
-                    }).set_index("Group")
+                    # Calculate fresh standings from tournament data if available
+                    if st.session_state.tournament_data or st.session_state.get('individual_matches', []):
+                        # Try new individual matches first
+                        if st.session_state.get('individual_matches', []):
+                            calculated_standings = calculate_standings_from_matches()
+                        else:
+                            # Fallback to old clash-based calculation for backward compatibility
+                            calculated_standings = calculate_standings()
+                        
+                        if not calculated_standings.empty:
+                            st.session_state.standings = calculated_standings.set_index('Team')
+                        else:
+                            # Initialize default standings
+                            st.session_state.standings = pd.DataFrame({
+                                "Group": [f"Group {chr(65+i)}" for i in range(6)],
+                                "Clash Wins": [0]*6,
+                                "Total Points": [0]*6
+                            }).set_index("Group")
+                    else:
+                        # Initialize default standings
+                        st.session_state.standings = pd.DataFrame({
+                            "Group": [f"Group {chr(65+i)}" for i in range(6)],
+                            "Clash Wins": [0]*6,
+                            "Total Points": [0]*6
+                        }).set_index("Group")
+                
+                # Always recalculate standings from available data to ensure accuracy
+                if st.session_state.get('individual_matches', []):
+                    calculated_standings = calculate_standings_from_matches()
+                    if not calculated_standings.empty:
+                        st.session_state.standings = calculated_standings.set_index('Team')
+                elif st.session_state.tournament_data:
+                    calculated_standings = calculate_standings()
+                    if not calculated_standings.empty:
+                        st.session_state.standings = calculated_standings.set_index('Team')
         except:
             # Initialize defaults if file doesn't exist
-            st.session_state.group_names = {f"Group {chr(65+i)}": f"Group {chr(65+i)}" for i in range(6)}
+            default_groups = [f"Group {chr(65+i)}" for i in range(6)]
+            default_names = ["Warriors", "Champions", "Legends", "Heroes", "Titans", "Gladiators"]
+            
+            st.session_state.group_names = {group: name for group, name in zip(default_groups, default_names)}
             st.session_state.subgroup_names = {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'}
-            st.session_state.groups = {f"Group {chr(65+i)}": [] for i in range(6)}
+            st.session_state.groups = {group: [] for group in default_groups}
             st.session_state.users = {}  # Initialize empty users dict
             st.session_state.clash_edit_history = []  # Initialize empty history
+            st.session_state.tournament_data = {}  # Initialize empty tournament data (backward compatibility)
+            # Initialize individual matches from file or create empty
+            load_matches()
+            st.session_state.detailed_groups = {}  # Initialize empty detailed groups
             st.session_state.standings = pd.DataFrame({
-                "Group": [f"Group {chr(65+i)}" for i in range(6)],
+                "Team": default_groups,
                 "Clash Wins": [0]*6,
                 "Total Points": [0]*6
-            }).set_index("Group")
+            }).set_index("Team")
             
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
 
 # Auto-save functionality
+def save_matches():
+    """Save individual matches to separate JSON file"""
+    try:
+        matches = st.session_state.get('individual_matches', [])
+        with open('matches.json', 'w') as f:
+            json.dump(matches, f, indent=2)
+    except Exception as e:
+        st.error(f"Error saving matches: {str(e)}")
+
+def load_matches():
+    """Load individual matches from JSON file"""
+    try:
+        with open('matches.json', 'r') as f:
+            matches = json.load(f)
+            st.session_state.individual_matches = matches
+    except FileNotFoundError:
+        st.session_state.individual_matches = []
+    except Exception as e:
+        st.error(f"Error loading matches: {str(e)}")
+        st.session_state.individual_matches = []
+
+def add_match(match_record):
+    """Add a new match and save to file"""
+    if 'individual_matches' not in st.session_state:
+        load_matches()
+    st.session_state.individual_matches.append(match_record)
+    save_matches()
+
+def update_match(match_index, updated_data):
+    """Update an existing match and save to file"""
+    if 'individual_matches' not in st.session_state:
+        load_matches()
+    if 0 <= match_index < len(st.session_state.individual_matches):
+        st.session_state.individual_matches[match_index].update(updated_data)
+        save_matches()
+        return True
+    return False
+
+def delete_match(match_index):
+    """Delete a match and save to file"""
+    if 'individual_matches' not in st.session_state:
+        load_matches()
+    if 0 <= match_index < len(st.session_state.individual_matches):
+        st.session_state.individual_matches.pop(match_index)
+        save_matches()
+        return True
+    return False
+
+def get_all_matches():
+    """Get all matches, loading from file if necessary"""
+    if 'individual_matches' not in st.session_state:
+        load_matches()
+    return st.session_state.individual_matches
+
+def clear_all_matches():
+    """Clear all matches and save to file"""
+    st.session_state.individual_matches = []
+    save_matches()
+
 def auto_save():
-    """Auto-save tournament data"""
+    """Save individual matches to separate JSON file"""
+    try:
+        matches = st.session_state.get('individual_matches', [])
+        with open('matches.json', 'w') as f:
+            json.dump(matches, f, indent=2)
+    except Exception as e:
+        st.error(f"Error saving matches: {str(e)}")
+
+def load_matches():
+    """Load individual matches from JSON file"""
+    try:
+        with open('matches.json', 'r') as f:
+            matches = json.load(f)
+            st.session_state.individual_matches = matches
+    except FileNotFoundError:
+        st.session_state.individual_matches = []
+    except Exception as e:
+        st.error(f"Error loading matches: {str(e)}")
+        st.session_state.individual_matches = []
+
+def auto_save():
+    """Auto-save tournament data and matches"""
     save_tournament_data()
+    save_matches()
 
 def generate_round_robin_schedule(groups, dates, start_time, end_time, num_courts, match_duration, break_duration):
     """
@@ -374,9 +511,9 @@ if 'initialized' not in st.session_state:
                 if player['name'] not in st.session_state.groups[player['group']]:
                     st.session_state.groups[player['group']].append(player['name'])
     
-    # Initialize tournament data if not exists
-    if 'tournament_data' not in st.session_state:
-        st.session_state.tournament_data = {}
+    # Initialize individual matches if not exists
+    if 'individual_matches' not in st.session_state:
+        load_matches()  # Load matches from file
     
     # Initialize edit history if not exists
     if 'clash_edit_history' not in st.session_state:
@@ -444,7 +581,7 @@ st.sidebar.divider()
 menu = st.sidebar.radio("Navigate", available_pages)
 
 # Auto-balancing algorithm
-def auto_balance_groups(players_df, min_females_per_group=None, max_females_per_group=None):
+def auto_balance_groups(players_df, min_females_per_group=None, max_females_per_group=None, force_rebalance=False):
     """
     Auto-balance players into 6 groups with optimized skill and gender distribution
     Uses iterative optimization to minimize skill variance between groups
@@ -453,8 +590,16 @@ def auto_balance_groups(players_df, min_females_per_group=None, max_females_per_
         players_df: DataFrame containing player data
         min_females_per_group: Minimum number of females per group (optional)
         max_females_per_group: Maximum number of females per group (optional)
+        force_rebalance: If True, introduces randomization for different team compositions
     """
     import itertools
+    import random
+    
+    # If force_rebalance is True, shuffle the player order to get different results
+    if force_rebalance:
+        players_df = players_df.sample(frac=1).reset_index(drop=True)
+        # Add some randomness to ensure different team compositions
+        random.seed(None)  # Use current time as seed
     
     # Separate male and female players
     male_players = players_df[players_df['gender'] == 'M'].copy()
@@ -545,14 +690,56 @@ def auto_balance_groups(players_df, min_females_per_group=None, max_females_per_
     def redistribute_for_perfect_balance():
         """Simple algorithm to achieve exactly 1-point max difference"""
         # Use the tested working algorithm
-        for iteration in range(100):  # Limit iterations
+        max_iterations = 100
+        
+        # If force_rebalance is True, do more swaps to ensure redistribution
+        if force_rebalance:
+            max_iterations = 200  # More iterations for more mixing
+            
+            # Perform some random swaps first to shuffle teams
+            for _ in range(10):  # Do random swaps of same-gender players
+                group1_idx = random.randint(0, len(group_keys)-1)
+                group2_idx = random.randint(0, len(group_keys)-1)
+                
+                if group1_idx == group2_idx:
+                    continue
+                    
+                group1 = groups[group_keys[group1_idx]]
+                group2 = groups[group_keys[group2_idx]]
+                
+                if not group1['players'] or not group2['players']:
+                    continue
+                    
+                # Find players of same gender to swap
+                for p1_idx, p1 in enumerate(group1['players']):
+                    for p2_idx, p2 in enumerate(group2['players']):
+                        if p1['gender'] == p2['gender']:  # Same gender
+                            # Perform the swap
+                            group1['players'][p1_idx] = p2
+                            group2['players'][p2_idx] = p1
+                            # Update totals
+                            skill_diff = p1['skill_level'] - p2['skill_level']
+                            group1['total_skill'] -= skill_diff
+                            group2['total_skill'] += skill_diff
+                            break
+                    else:
+                        continue
+                    break
+        
+        for iteration in range(max_iterations):  # Use variable iterations
             # Get current group totals
             totals = [groups[key]['total_skill'] for key in group_keys]
             max_total = max(totals)
             min_total = min(totals)
             
-            # If balanced within 1 point, we're done
-            if max_total - min_total <= 1:
+            # If balanced within 1 point, we're done (unless force_rebalance is True)
+            if max_total - min_total <= 1 and not force_rebalance:
+                break
+            
+            # For force_rebalance, do at least 15 iterations to ensure redistribution
+            if force_rebalance and iteration < 15:
+                pass  # Continue balancing even if already balanced
+            elif max_total - min_total <= 1:
                 break
             
             # Find highest and lowest groups
@@ -613,7 +800,7 @@ def auto_balance_groups(players_df, min_females_per_group=None, max_females_per_
     return result_groups
 
 
-def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max, subgroup1_count, subgroup2_count, num_groups=6, min_females_per_group=None, max_females_per_group=None):
+def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max, subgroup1_count, subgroup2_count, num_groups=6, min_females_per_group=None, max_females_per_group=None, force_rebalance=False):
     """
     Auto-balance players into specified number of groups with 2 skill-based subgroups each
     Ensures skill point balance at group level, subgroup 1 level, and subgroup 2 level
@@ -621,9 +808,16 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
     Args:
         min_females_per_group: Minimum number of females per group (optional)
         max_females_per_group: Maximum number of females per group (optional)
+        force_rebalance: If True, introduces randomization for different team compositions
     """
     import itertools
     import random
+    
+    # If force_rebalance is True, shuffle the player order to get different results
+    if force_rebalance:
+        players_df = players_df.sample(frac=1).reset_index(drop=True)
+        # Add some randomness to ensure different team compositions
+        random.seed(None)  # Use current time as seed
     
     # Filter players based on skill level ranges
     subgroup1_players = players_df[
@@ -678,7 +872,7 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
     
     group_keys = list(groups.keys())
     
-    def balance_players_by_skill(players_list, subgroup_type, target_count_per_group):
+    def balance_players_by_skill(players_list, subgroup_type, target_count_per_group, force_rebalance=False):
         """Balance players across all groups to minimize skill variance while respecting gender constraints"""
         if len(players_list) == 0:
             return
@@ -795,12 +989,63 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
                     groups[group_name][subgroup_type]['female_count'] += 1
         
         # Optimize by swapping players to reduce variance
-        optimize_skill_balance(subgroup_type, target_count_per_group)
+        optimize_skill_balance(subgroup_type, target_count_per_group, force_rebalance)
     
-    def optimize_skill_balance(subgroup_type, target_count_per_group):
+    def optimize_skill_balance(subgroup_type, target_count_per_group, force_rebalance=False):
         """Simple redistribution for subgroups using the proven algorithm"""
         
-        for iteration in range(100):  # Limit iterations
+        max_iterations = 100
+        
+        # If force_rebalance is True, do more mixing with proper skill validation
+        if force_rebalance:
+            max_iterations = 200  # More iterations for better mixing
+            
+            # Determine skill range for this subgroup to validate swaps
+            if subgroup_type == 'subgroup1':
+                valid_min_skill, valid_max_skill = subgroup1_min, subgroup1_max
+            else:  # subgroup2
+                valid_min_skill, valid_max_skill = subgroup2_min, subgroup2_max
+            
+            # Perform some random swaps first within this subgroup to shuffle teams
+            for _ in range(8):  # Reduced random swaps of same-gender players
+                group1_idx = random.randint(0, len(group_keys)-1)
+                group2_idx = random.randint(0, len(group_keys)-1)
+                
+                if group1_idx == group2_idx:
+                    continue
+                    
+                group1 = groups[group_keys[group1_idx]][subgroup_type]
+                group2 = groups[group_keys[group2_idx]][subgroup_type]
+                
+                if not group1['players'] or not group2['players']:
+                    continue
+                    
+                # Find players of same gender AND valid skill range to swap
+                swap_made = False
+                for p1_idx, p1 in enumerate(group1['players']):
+                    if swap_made:
+                        break
+                    
+                    # Validate p1 belongs to correct skill range
+                    if not (valid_min_skill <= p1['skill_level'] <= valid_max_skill):
+                        continue
+                        
+                    for p2_idx, p2 in enumerate(group2['players']):
+                        # Validate p2 belongs to correct skill range AND same gender
+                        if (p1['gender'] == p2['gender'] and 
+                            valid_min_skill <= p2['skill_level'] <= valid_max_skill):
+                            
+                            # Perform the swap
+                            group1['players'][p1_idx] = p2
+                            group2['players'][p2_idx] = p1
+                            # Update totals
+                            skill_diff = p1['skill_level'] - p2['skill_level']
+                            group1['total_skill'] -= skill_diff
+                            group2['total_skill'] += skill_diff
+                            swap_made = True
+                            break
+        
+        for iteration in range(max_iterations):  # Use variable iterations
             # Get current group totals for this subgroup
             current_skills = [groups[group_key][subgroup_type]['total_skill'] for group_key in group_keys]
             
@@ -810,8 +1055,14 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
             max_skill = max(current_skills)
             min_skill = min(current_skills)
             
-            # Success: difference <= 1
-            if max_skill - min_skill <= 1:
+            # Success: difference <= 1 (unless force_rebalance is True)
+            if max_skill - min_skill <= 1 and not force_rebalance:
+                break
+            
+            # For force_rebalance, do at least 10 iterations to ensure redistribution
+            if force_rebalance and iteration < 10:
+                pass  # Continue balancing even if already balanced
+            elif max_skill - min_skill <= 1:
                 break
             
             # Find max and min groups
@@ -866,15 +1117,90 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
                 break  # No beneficial swap found
     
     # Balance subgroup 1 players
-    balance_players_by_skill(subgroup1_selected, 'subgroup1', subgroup1_count)
+    balance_players_by_skill(subgroup1_selected, 'subgroup1', subgroup1_count, force_rebalance)
     
     # Balance subgroup 2 players  
-    balance_players_by_skill(subgroup2_selected, 'subgroup2', subgroup2_count)
+    balance_players_by_skill(subgroup2_selected, 'subgroup2', subgroup2_count, force_rebalance)
     
     # Final step: Balance overall combined totals across all groups
     def balance_overall_groups():
         """Balance the combined totals of subgroup1 + subgroup2 across all groups"""
-        for iteration in range(100):
+        max_iterations = 100
+        
+        # If force_rebalance is True, do more iterations but NO cross-subgroup swaps
+        if force_rebalance:
+            max_iterations = 200  # More iterations for better mixing
+            
+            # Only perform swaps WITHIN each subgroup type separately to maintain skill constraints
+            # This ensures players never move between subgroups
+            
+            # Random swaps within subgroup1 only
+            for _ in range(8):  # Reduced random swaps within subgroup1 only
+                group1_idx = random.randint(0, len(group_keys)-1)
+                group2_idx = random.randint(0, len(group_keys)-1)
+                
+                if group1_idx == group2_idx:
+                    continue
+                    
+                group1_sg1 = groups[group_keys[group1_idx]]['subgroup1']
+                group2_sg1 = groups[group_keys[group2_idx]]['subgroup1']
+                
+                if not group1_sg1['players'] or not group2_sg1['players']:
+                    continue
+                    
+                # Swap within subgroup1 only (same skill range)
+                for p1_idx, p1 in enumerate(group1_sg1['players']):
+                    for p2_idx, p2 in enumerate(group2_sg1['players']):
+                        if (p1['gender'] == p2['gender'] and 
+                            subgroup1_min <= p1['skill_level'] <= subgroup1_max and
+                            subgroup1_min <= p2['skill_level'] <= subgroup1_max):
+                            
+                            # Perform swap within subgroup1
+                            group1_sg1['players'][p1_idx] = p2
+                            group2_sg1['players'][p2_idx] = p1
+                            # Update totals
+                            skill_diff = p1['skill_level'] - p2['skill_level']
+                            group1_sg1['total_skill'] -= skill_diff
+                            group2_sg1['total_skill'] += skill_diff
+                            break
+                    else:
+                        continue
+                    break
+                        
+            # Random swaps within subgroup2 only  
+            for _ in range(8):  # Reduced random swaps within subgroup2 only
+                group1_idx = random.randint(0, len(group_keys)-1)
+                group2_idx = random.randint(0, len(group_keys)-1)
+                
+                if group1_idx == group2_idx:
+                    continue
+                    
+                group1_sg2 = groups[group_keys[group1_idx]]['subgroup2']
+                group2_sg2 = groups[group_keys[group2_idx]]['subgroup2']
+                
+                if not group1_sg2['players'] or not group2_sg2['players']:
+                    continue
+                    
+                # Swap within subgroup2 only (same skill range)
+                for p1_idx, p1 in enumerate(group1_sg2['players']):
+                    for p2_idx, p2 in enumerate(group2_sg2['players']):
+                        if (p1['gender'] == p2['gender'] and 
+                            subgroup2_min <= p1['skill_level'] <= subgroup2_max and
+                            subgroup2_min <= p2['skill_level'] <= subgroup2_max):
+                            
+                            # Perform swap within subgroup2
+                            group1_sg2['players'][p1_idx] = p2
+                            group2_sg2['players'][p2_idx] = p1
+                            # Update totals
+                            skill_diff = p1['skill_level'] - p2['skill_level']
+                            group1_sg2['total_skill'] -= skill_diff
+                            group2_sg2['total_skill'] += skill_diff
+                            break
+                    else:
+                        continue
+                    break
+                        
+        for iteration in range(max_iterations):
             # Calculate combined totals
             combined_totals = []
             for key in group_keys:
@@ -885,8 +1211,14 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
             max_total = max(combined_totals)
             min_total = min(combined_totals)
             
-            # If balanced within 1 point, we're done
-            if max_total - min_total <= 1:
+            # If balanced within 1 point, we're done (unless force_rebalance is True)
+            if max_total - min_total <= 1 and not force_rebalance:
+                break
+            
+            # For force_rebalance, do at least 15 iterations to ensure redistribution
+            if force_rebalance and iteration < 15:
+                pass  # Continue balancing even if already balanced
+            elif max_total - min_total <= 1:
                 break
             
             # Find highest and lowest groups
@@ -897,13 +1229,19 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
             best_swap = None
             best_improvement = 0
             
-            # Try swaps within subgroup1
+            # Try swaps within subgroup1 with skill validation
             max_sg1 = groups[group_keys[max_idx]]['subgroup1']
             min_sg1 = groups[group_keys[min_idx]]['subgroup1']
             
             for i, max_player in enumerate(max_sg1['players']):
                 for j, min_player in enumerate(min_sg1['players']):
                     if max_player['gender'] != min_player['gender']:
+                        continue
+                    
+                    # Validate both players belong to subgroup1 skill range
+                    if not (subgroup1_min <= max_player['skill_level'] <= subgroup1_max):
+                        continue
+                    if not (subgroup1_min <= min_player['skill_level'] <= subgroup1_max):
                         continue
                     
                     skill_diff = max_player['skill_level'] - min_player['skill_level']
@@ -919,13 +1257,19 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
                         best_improvement = improvement
                         best_swap = ('subgroup1', i, j, max_player, min_player, skill_diff)
             
-            # Try swaps within subgroup2
+            # Try swaps within subgroup2 with skill validation
             max_sg2 = groups[group_keys[max_idx]]['subgroup2']
             min_sg2 = groups[group_keys[min_idx]]['subgroup2']
             
             for i, max_player in enumerate(max_sg2['players']):
                 for j, min_player in enumerate(min_sg2['players']):
                     if max_player['gender'] != min_player['gender']:
+                        continue
+                        
+                    # Validate both players belong to subgroup2 skill range
+                    if not (subgroup2_min <= max_player['skill_level'] <= subgroup2_max):
+                        continue
+                    if not (subgroup2_min <= min_player['skill_level'] <= subgroup2_max):
                         continue
                     
                     skill_diff = max_player['skill_level'] - min_player['skill_level']
@@ -960,6 +1304,18 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
     # Apply final overall balancing
     balance_overall_groups()
     
+    # VALIDATION: Ensure no players are in wrong subgroups
+    for group_name in group_keys:
+        # Validate subgroup1 players
+        for player in groups[group_name]['subgroup1']['players']:
+            if not (subgroup1_min <= player['skill_level'] <= subgroup1_max):
+                raise ValueError(f"VALIDATION ERROR: Player {player['name']} (skill {player['skill_level']}) is in subgroup1 but should be in skill range {subgroup1_min}-{subgroup1_max}")
+        
+        # Validate subgroup2 players  
+        for player in groups[group_name]['subgroup2']['players']:
+            if not (subgroup2_min <= player['skill_level'] <= subgroup2_max):
+                raise ValueError(f"VALIDATION ERROR: Player {player['name']} (skill {player['skill_level']}) is in subgroup2 but should be in skill range {subgroup2_min}-{subgroup2_max}")
+    
     # Convert to the expected format - combine subgroups into main groups
     result_groups = {}
     for group_name in group_keys:
@@ -988,10 +1344,10 @@ def calculate_group_stats(group_players):
         "total_skill": total_skill
     }
 
-def calculate_standings():
-    """Calculate comprehensive standings with proper ranking"""
-    if 'tournament_data' not in st.session_state:
-        st.session_state.tournament_data = {}
+def calculate_standings_from_matches():
+    """Calculate standings from individual match records"""
+    if 'individual_matches' not in st.session_state:
+        load_matches()  # Load matches from file
     
     standings_data = []
     
@@ -1002,144 +1358,364 @@ def calculate_standings():
         total_points = 0
         matches_played = 0
         
-        # Count wins and points from tournament data
-        for clash_key, matches in st.session_state.tournament_data.items():
-            if group_name in clash_key:
-                for match_result in matches:
-                    matches_played += 1
-                    if match_result.get('winner') == group_name:
-                        wins += 1
-                        total_points += match_result.get('points', 0)
-                    else:
-                        losses += 1
-        
-        # Also get data from the legacy standings format
-        if group_name in st.session_state.standings.index:
-            legacy_wins = st.session_state.standings.at[group_name, "Clash Wins"]
-            legacy_points = st.session_state.standings.at[group_name, "Total Points"]
-            wins += legacy_wins
-            total_points += legacy_points
+        # Count from individual matches
+        for match in st.session_state.individual_matches:
+            if match['team1'] == group_name:
+                matches_played += 1
+                if match['winner'] == group_name:
+                    wins += 1
+                    total_points += match['match_points']
+                else:
+                    losses += 1
+            elif match['team2'] == group_name:
+                matches_played += 1
+                if match['winner'] == group_name:
+                    wins += 1
+                    total_points += match['match_points']
+                else:
+                    losses += 1
         
         standings_data.append({
             'Team': st.session_state.group_names.get(group_name, group_name),
+            'Matches Played': matches_played,
             'Wins': wins,
             'Losses': losses,
             'Points': total_points,
-            'Matches': wins + losses
+            'Win Rate': f"{(wins/matches_played*100):.1f}%" if matches_played > 0 else "0.0%"
         })
     
-    # Create DataFrame and sort by wins (descending), then points (descending)
+    # Create DataFrame and sort by wins, then points
     df = pd.DataFrame(standings_data)
     if not df.empty:
         df = df.sort_values(['Wins', 'Points'], ascending=[False, False]).reset_index(drop=True)
+        
+        # Add rank column
+        df.insert(0, 'Rank', range(1, len(df) + 1))
+    
+    return df
+
+def manage_recorded_matches():
+    """Display and manage all recorded matches"""
+    if 'individual_matches' not in st.session_state:
+        load_matches()  # Load matches from file
+    
+    if not st.session_state.individual_matches:
+        st.info("📋 No matches recorded yet. Record your first match to get started!")
+        return
+    
+    st.subheader(f"📋 Recorded Matches ({len(st.session_state.individual_matches)})")
+    
+    # Display matches in a table format
+    for i, match in enumerate(st.session_state.individual_matches):
+        with st.expander(f"Match #{i+1}: {match['team1_display']} vs {match['team2_display']} - {match['recorded_at'][:19]}", expanded=False):
+            
+            col1, col2, col3 = st.columns([2, 2, 1])
+            
+            with col1:
+                st.markdown("**Match Details:**")
+                st.write(f"🏆 **Winner:** {st.session_state.group_names.get(match['winner'], match['winner'])}")
+                st.write(f"🏅 **Score:** {match['score_display']} ({match['match_points']} points)")
+                st.write(f"📏 **Recorded by:** {match['recorded_by']}")
+                
+            with col2:
+                st.markdown("**Teams & Players:**")
+                st.write(f"**{match['team1_display']}:** {', '.join(match['team1_players'])}")
+                st.write(f"**{match['team2_display']}:** {', '.join(match['team2_players'])}")
+                
+                # Set by set breakdown
+                st.markdown("**Set Scores:**")
+                for set_num, (s1, s2) in enumerate(match['set_scores'].values(), 1):
+                    if match['set_scores'][f'set{set_num}'] is not None:
+                        st.write(f"Set {set_num}: {s1}-{s2}")
+            
+            with col3:
+                if get_current_user_role() == 'superuser':
+                    st.markdown("**Actions:**")
+                    if st.button("✏️ Edit", key=f"edit_match_{i}"):
+                        st.session_state.edit_match_index = i
+                        st.rerun()
+                    
+                    if st.button("🗑️ Delete", key=f"delete_match_{i}"):
+                        # Confirm deletion
+                        if st.button(f"⚠️ Confirm Delete Match #{i+1}", key=f"confirm_delete_{i}", type="secondary"):
+                            # Remove match using CRUD function
+                            if delete_match(i):
+                                # Recalculate standings
+                                updated_standings = calculate_standings_from_matches()
+                                if not updated_standings.empty:
+                                    st.session_state.standings = updated_standings.set_index('Team')
+                                
+                                st.success(f"✅ Match #{i+1} deleted successfully!")
+                                st.rerun()
+                else:
+                    st.info("🔒 Superuser\nrequired for edits")
+
+def edit_selected_match():
+    """Edit the selected match"""
+    if 'edit_match_index' not in st.session_state:
+        return
+    
+    match_index = st.session_state.edit_match_index
+    match = st.session_state.individual_matches[match_index]
+    
+    st.subheader(f"✏️ Edit Match #{match_index+1}")
+    
+    # Display current match info
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info(f"**Current Match:** {match['team1_display']} vs {match['team2_display']}")
+    with col2:
+        st.info(f"**Current Winner:** {st.session_state.group_names.get(match['winner'], match['winner'])} {match['score_display']}")
+    
+    # Edit form
+    st.markdown("### 📝 Update Match Details")
+    
+    # Current players (read-only display)
+    st.markdown("**Current Players:**")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write(f"{match['team1_display']}: {', '.join(match['team1_players'])}")
+    with col2:
+        st.write(f"{match['team2_display']}: {', '.join(match['team2_players'])}")
+    
+    st.divider()
+    
+    # Edit scores
+    st.markdown("**📊 Update Match Scores**")
+    col1, col2, col3 = st.columns(3)
+    
+    # Get current scores
+    current_set1 = match['set_scores']['set1']
+    current_set2 = match['set_scores']['set2']
+    current_set3 = match['set_scores'].get('set3', (0, 0))
+    
+    # Set 1
+    with col1:
+        st.markdown("**Set 1**")
+        new_set1_g1 = st.number_input(f"{match['team1_display']}", min_value=0, max_value=30, 
+                                     value=current_set1[0], key="edit_set1_g1")
+        new_set1_g2 = st.number_input(f"{match['team2_display']}", min_value=0, max_value=30, 
+                                     value=current_set1[1], key="edit_set1_g2")
+    
+    # Set 2
+    with col2:
+        st.markdown("**Set 2**")
+        new_set2_g1 = st.number_input(f"{match['team1_display']}", min_value=0, max_value=30, 
+                                     value=current_set2[0], key="edit_set2_g1")
+        new_set2_g2 = st.number_input(f"{match['team2_display']}", min_value=0, max_value=30, 
+                                     value=current_set2[1], key="edit_set2_g2")
+    
+    # Set 3
+    with col3:
+        st.markdown("**Set 3**")
+        if current_set3 and (current_set3[0] > 0 or current_set3[1] > 0):
+            new_set3_g1 = st.number_input(f"{match['team1_display']}", min_value=0, max_value=30, 
+                                         value=current_set3[0], key="edit_set3_g1")
+            new_set3_g2 = st.number_input(f"{match['team2_display']}", min_value=0, max_value=30, 
+                                         value=current_set3[1], key="edit_set3_g2")
+        else:
+            new_set3_g1 = st.number_input(f"{match['team1_display']}", min_value=0, max_value=30, 
+                                         value=0, key="edit_set3_g1")
+            new_set3_g2 = st.number_input(f"{match['team2_display']}", min_value=0, max_value=30, 
+                                         value=0, key="edit_set3_g2")
+    
+    # Calculate new winner and points
+    new_sets_won_g1 = (new_set1_g1 > new_set1_g2) + (new_set2_g1 > new_set2_g2) + (new_set3_g1 > new_set3_g2)
+    new_sets_won_g2 = (new_set1_g2 > new_set1_g1) + (new_set2_g2 > new_set2_g1) + (new_set3_g2 > new_set3_g1)
+    
+    new_winner = None
+    new_points = 0
+    if new_sets_won_g1 > new_sets_won_g2:
+        new_winner = match['team1']
+        new_points = 2 if new_sets_won_g1 == 2 and new_sets_won_g2 == 0 else 1
+    elif new_sets_won_g2 > new_sets_won_g1:
+        new_winner = match['team2']
+        new_points = 2 if new_sets_won_g2 == 2 and new_sets_won_g1 == 0 else 1
+    
+    # Show new result preview
+    st.divider()
+    if new_winner:
+        winner_display = match['team1_display'] if new_winner == match['team1'] else match['team2_display']
+        st.success(f"🏆 **New Result:** {winner_display} wins ({new_sets_won_g1 if new_winner == match['team1'] else new_sets_won_g2}-{new_sets_won_g2 if new_winner == match['team1'] else new_sets_won_g1}) - {new_points} points")
+    else:
+        st.warning("⚠️ Please complete the score entry")
+    
+    # Edit reason
+    edit_reason = st.text_input("Reason for editing:", placeholder="e.g., Score correction, missed set")
+    
+    # Update buttons
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("✅ Save Changes", type="primary", disabled=new_winner is None):
+            # Update the match using CRUD function
+            updated_data = {
+                'set_scores': {
+                    'set1': (new_set1_g1, new_set1_g2),
+                    'set2': (new_set2_g1, new_set2_g2), 
+                    'set3': (new_set3_g1, new_set3_g2) if (new_set3_g1 > 0 or new_set3_g2 > 0) else None
+                },
+                'winner': new_winner,
+                'sets_won_team1': new_sets_won_g1,
+                'sets_won_team2': new_sets_won_g2,
+                'match_points': new_points,
+                'score_display': f"({new_sets_won_g1}-{new_sets_won_g2})",
+                'last_edited_by': get_current_user(),
+                'last_edited_at': datetime.now().isoformat(),
+                'edit_reason': edit_reason
+            }
+            
+            if update_match(match_index, updated_data):
+                # Recalculate standings
+                updated_standings = calculate_standings_from_matches()
+                if not updated_standings.empty:
+                    st.session_state.standings = updated_standings.set_index('Team')
+                
+                st.success("✅ Match updated successfully!")
+                del st.session_state.edit_match_index  # Clear edit mode
+                st.rerun()
+    
+    with col2:
+        if st.button("❌ Cancel"):
+            del st.session_state.edit_match_index
+            st.rerun()
+    
+def calculate_standings():
+    """Legacy function for backward compatibility with old clash-based data"""
+    if 'tournament_data' not in st.session_state:
+        st.session_state.tournament_data = {}
+    
+    standings_data = []
+    
+    # Calculate standings for each group from old tournament_data format
+    for group_name in st.session_state.groups.keys():
+        clash_wins = 0
+        clash_losses = 0
+        total_points = 0
+        total_matches_won = 0
+        total_matches_lost = 0
+        
+        # Count from tournament data
+        for clash_key, matches in st.session_state.tournament_data.items():
+            if group_name in clash_key and '_vs_' in clash_key:
+                # Properly parse clash key (e.g., "Group A_vs_Group B")
+                parts = clash_key.split('_vs_')
+                if len(parts) == 2:
+                    team1, team2 = parts[0], parts[1]
+                    if team1 == group_name:
+                        opponent = team2
+                    elif team2 == group_name:
+                        opponent = team1
+                    else:
+                        continue
+                else:
+                    continue
+                
+                # Count matches won/lost and points for this clash
+                clash_matches_won = 0
+                clash_matches_lost = 0
+                clash_points = 0
+                
+                for match_result in matches:
+                    winner = match_result.get('winner')
+                    if winner == group_name:
+                        clash_matches_won += 1
+                        clash_points += match_result.get('match_points', 1)
+                    elif winner == opponent:
+                        clash_matches_lost += 1
+                
+                total_matches_won += clash_matches_won
+                total_matches_lost += clash_matches_lost
+                total_points += clash_points
+                
+                # Determine clash winner (best of 5 matches)
+                if clash_matches_won > clash_matches_lost:
+                    clash_wins += 1
+                elif clash_matches_lost > clash_matches_won:
+                    clash_losses += 1
+        
+        standings_data.append({
+            'Team': st.session_state.group_names.get(group_name, group_name),
+            'Clash Wins': clash_wins,
+            'Clash Losses': clash_losses, 
+            'Match Wins': total_matches_won,
+            'Match Losses': total_matches_lost,
+            'Points': total_points,
+            'Clashes Played': clash_wins + clash_losses
+        })
+    
+    # Create DataFrame and sort by clash wins, then points, then match wins
+    df = pd.DataFrame(standings_data)
+    if not df.empty:
+        df = df.sort_values(['Clash Wins', 'Points', 'Match Wins'], ascending=[False, False, False]).reset_index(drop=True)
+        
+        # Add rank column
+        df.insert(0, 'Rank', range(1, len(df) + 1))
     
     return df
 
 def record_new_clash():
-    """Function to handle new clash recording"""
-    col1, col2 = st.columns(2)
-    with col1:
-        # Display group names with their custom names
-        group_options = [st.session_state.group_names.get(key, key) for key in st.session_state.groups.keys()]
-        group_keys = list(st.session_state.groups.keys())
-        g1_display = st.selectbox("Select Group 1", group_options, index=0, key="new_clash_g1")
-        g1 = group_keys[group_options.index(g1_display)]
-    with col2:
-        g2_display = st.selectbox("Select Group 2", group_options, index=1 if len(group_options) > 1 else 0, key="new_clash_g2")
-        g2 = group_keys[group_options.index(g2_display)]
-
-    if g1 == g2:
-        st.error("Please select two different groups.")
+    """Function to handle match recording - now simplified to individual matches"""
+    # Check if we're in edit mode for a specific match
+    if 'edit_match_index' in st.session_state:
+        edit_selected_match()
         return
-        
-    # Rest of the existing clash recording logic will go here
-    record_clash_matches(g1, g2, "new")
+    
+    # Otherwise show the record single match interface
+    record_single_match()
 
 def edit_clash_results():
-    """Function to handle editing existing clash results"""
-    if not st.session_state.tournament_data:
-        st.info("📝 No recorded clashes available to edit.")
-        return
-    
-    # Show list of recorded clashes
-    clash_options = []
-    for clash_key in st.session_state.tournament_data.keys():
-        if '_vs_' in clash_key:
-            parts = clash_key.split('_vs_')
-            if len(parts) == 2:
-                clash_options.append({
-                    'key': clash_key,
-                    'display': f"{parts[0]} vs {parts[1]}",
-                    'g1': parts[0],
-                    'g2': parts[1]
-                })
-    
-    if not clash_options:
-        st.info("📝 No recorded clashes available to edit.")
-        return
-    
-    # Select clash to edit
-    selected_clash = st.selectbox(
-        "Select clash to edit:",
-        clash_options,
-        format_func=lambda x: x['display'],
-        key="edit_clash_selector"
-    )
-    
-    if selected_clash:
-        st.subheader(f"Edit: {selected_clash['display']}")
-        
-        # Show current results
-        current_results = st.session_state.tournament_data.get(selected_clash['key'], [])
-        if current_results:
-            st.markdown("**Current Results:**")
-            for i, result in enumerate(current_results):
-                match_info = result.get('match_info', {})
-                st.write(f"Match {i+1}: {result.get('winner_display', 'Unknown')} wins {result.get('score_display', '')} - {result.get('points', 0)} points")
-        
-        # Edit interface
-        record_clash_matches(selected_clash['g1'], selected_clash['g2'], "edit", selected_clash['key'])
+    """Function to handle editing/managing individual match results"""
+    manage_recorded_matches()
 
 def view_clash_results():
-    """Function for admins to view clash results (read-only)"""
-    if not st.session_state.tournament_data:
-        st.info("📝 No recorded clashes available.")
+    """Function for viewing match results (read-only)"""
+    if 'individual_matches' not in st.session_state:
+        load_matches()  # Load matches from file
+    
+    if not st.session_state.individual_matches:
+        st.info("📋 No matches recorded yet.")
         return
     
-    for clash_key, results in st.session_state.tournament_data.items():
-        if '_vs_' in clash_key:
-            parts = clash_key.split('_vs_')
-            if len(parts) == 2:
-                with st.expander(f"📊 {parts[0]} vs {parts[1]}"):
-                    if results:
-                        total_g1_points = 0
-                        total_g2_points = 0
-                        g1_wins = 0
-                        g2_wins = 0
-                        
-                        for i, result in enumerate(results):
-                            match_info = result.get('match_info', {})
-                            winner = result.get('winner_display', 'Unknown')
-                            score = result.get('score_display', '')
-                            points = result.get('points', 0)
-                            
-                            st.write(f"**Match {i+1}:** {winner} wins {score} - {points} points")
-                            
-                            if result.get('winner') == 'g1':
-                                total_g1_points += points
-                                g1_wins += 1
-                            elif result.get('winner') == 'g2':
-                                total_g2_points += points
-                                g2_wins += 1
-                        
-                        st.markdown("---")
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.metric(f"{parts[0]}", f"{g1_wins} wins, {total_g1_points} points")
-                        with col2:
-                            st.metric(f"{parts[1]}", f"{g2_wins} wins, {total_g2_points} points")
-                    else:
-                        st.write("No match data available")
+    st.subheader(f"📊 Match Results Summary ({len(st.session_state.individual_matches)} matches)")
+    
+    # Group matches by teams for better organization
+    team_matches = {}
+    for match in st.session_state.individual_matches:
+        key = f"{match['team1_display']} vs {match['team2_display']}"
+        if key not in team_matches:
+            team_matches[key] = []
+        team_matches[key].append(match)
+    
+    # Display grouped matches
+    for team_pair, matches in team_matches.items():
+        with st.expander(f"🎯 {team_pair} ({len(matches)} matches)"):
+            team1_wins = 0
+            team2_wins = 0
+            team1_points = 0
+            team2_points = 0
+            
+            for i, match in enumerate(matches):
+                winner_name = st.session_state.group_names.get(match['winner'], match['winner'])
+                st.write(f"**Match {i+1}:** {winner_name} wins {match['score_display']} - {match['match_points']} points")
+                st.write(f"  📊 Players: {', '.join(match['team1_players'])} vs {', '.join(match['team2_players'])}")
+                st.write(f"  📅 Recorded: {match['recorded_at'][:19]}")
+                
+                # Count wins and points
+                if match['winner'] == match['team1']:
+                    team1_wins += 1
+                    team1_points += match['match_points']
+                else:
+                    team2_wins += 1
+                    team2_points += match['match_points']
+                
+                st.markdown("---")
+            
+            # Summary for this team pair
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(match['team1_display'], f"{team1_wins} wins, {team1_points} points")
+            with col2:
+                st.metric(match['team2_display'], f"{team2_wins} wins, {team2_points} points")
 
 def show_edit_history():
     """Function to display clash edit history"""
@@ -1185,330 +1761,193 @@ def log_clash_edit(clash_key, match_number, action, original_data, new_data, rea
     st.session_state.clash_edit_history.append(edit_entry)
     auto_save()  # Save immediately after logging
 
-def record_clash_matches(g1, g2, mode="new", clash_key=None):
-    """Function to record or edit clash matches"""
-    if mode == "new":
-        st.subheader(f"Match Details: {g1} vs {g2}")
-        st.info("Record each doubles match individually. Click 'Submit Match' after entering scores for each match.")
-        
-        # Initialize session state for recorded matches if not exists
-        current_clash_key = f"{g1}_vs_{g2}"
-        if f"recorded_matches_{current_clash_key}" not in st.session_state:
-            st.session_state[f"recorded_matches_{current_clash_key}"] = {}
-    else:
-        st.info("Edit match results. Changes will be logged for audit purposes.")
-        current_clash_key = clash_key
-        
-        # Load existing data for editing
-        if f"edit_matches_{current_clash_key}" not in st.session_state:
-            existing_data = st.session_state.tournament_data.get(current_clash_key, [])
-            st.session_state[f"edit_matches_{current_clash_key}"] = {}
-            
-            # Convert existing data to edit format
-            for i, result in enumerate(existing_data):
-                st.session_state[f"edit_matches_{current_clash_key}"][i] = result
-
-    def calculate_match_result(set1_g1, set1_g2, set2_g1, set2_g2, set3_g1, set3_g2):
-        """Calculate match winner and points based on set scores"""
-        sets_won_g1 = 0
-        sets_won_g2 = 0
-        
-        # Count sets won
-        if set1_g1 > set1_g2:
-            sets_won_g1 += 1
-        elif set1_g2 > set1_g1:
-            sets_won_g2 += 1
-            
-        if set2_g1 > set2_g2:
-            sets_won_g1 += 1
-        elif set2_g2 > set2_g1:
-            sets_won_g2 += 1
-            
-        if set3_g1 > set3_g2:
-            sets_won_g1 += 1
-        elif set3_g2 > set3_g1:
-            sets_won_g2 += 1
-        
-        # Determine winner and points
-        if sets_won_g1 == 2:
-            winner = "g1"
-            points = 2 if sets_won_g2 == 0 else 1  # 2 points for 2-0, 1 point for 2-1
-        elif sets_won_g2 == 2:
-            winner = "g2"
-            points = 2 if sets_won_g1 == 0 else 1  # 2 points for 2-0, 1 point for 2-1
-        else:
-            winner = None
-            points = 0
-            
-        return winner, points, sets_won_g1, sets_won_g2
-
-    # Track current clash totals
-    g1_clash_points = 0
-    g2_clash_points = 0
-    g1_match_wins = 0
-    g2_match_wins = 0
+def record_single_match():
+    """Simple UI to record a single match"""
+    st.subheader("📝 Record a Single Match")
+    st.info("💡 Record one doubles match at a time for accurate tracking")
     
-    session_key = f"recorded_matches_{current_clash_key}" if mode == "new" else f"edit_matches_{current_clash_key}"
-    
-    for i in range(5):
-        match_recorded = i in st.session_state[session_key]
-        
-        # Show different styling for recorded matches
-        if match_recorded:
-            with st.expander(f"🏸 ✅ Doubles Match #{i+1} - {'RECORDED' if mode == 'new' else 'CURRENT'}", expanded=False):
-                recorded_data = st.session_state[session_key][i]
-                st.success(f"**Winner**: {recorded_data['winner_display']}")
-                st.info(f"**Score**: {recorded_data['score_display']}")
-                st.info(f"**Points**: {recorded_data['points']} points awarded")
-                
-                if mode == "edit" and get_current_user_role() == 'superuser':
-                    if st.button(f"✏️ Edit Match #{i+1}", key=f"edit_match_{i}"):
-                        # Store original data for logging
-                        st.session_state[f"original_match_{current_clash_key}_{i}"] = recorded_data.copy()
-                        del st.session_state[session_key][i]
-                        st.rerun()
-                elif mode == "new":
-                    if st.button(f"🔄 Re-record Match #{i+1}", key=f"rerecord_{i}"):
-                        del st.session_state[session_key][i]
-                        st.rerun()
-                        
-                # Add to totals
-                if recorded_data['winner'] == 'g1':
-                    g1_clash_points += recorded_data['points']
-                    g1_match_wins += 1
-                elif recorded_data['winner'] == 'g2':
-                    g2_clash_points += recorded_data['points']
-                    g2_match_wins += 1
-        else:
-            with st.expander(f"🏸 Doubles Match #{i+1}", expanded=True):
-                # Player selection
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown(f"**{g1} Team**")
-                    p1 = st.multiselect(f"Select 2 players from {g1}", 
-                                       st.session_state.groups[g1], 
-                                       max_selections=2, 
-                                       key=f"{mode}_g1_m{i}")
-                with col2:
-                    st.markdown(f"**{g2} Team**")
-                    p2 = st.multiselect(f"Select 2 players from {g2}", 
-                                       st.session_state.groups[g2], 
-                                       max_selections=2, 
-                                       key=f"{mode}_g2_m{i}")
-                
-                st.divider()
-                
-                # Set scores input
-                st.markdown("**Set Scores** (Enter points for each set)")
-                
-                # Set 1
-                set1_col1, set1_col2, set1_col3 = st.columns([1, 1, 2])
-                with set1_col1:
-                    set1_g1 = st.number_input(f"Set 1 - {g1}", min_value=0, max_value=30, value=0, key=f"{mode}_set1_g1_{i}")
-                with set1_col2:
-                    set1_g2 = st.number_input(f"Set 1 - {g2}", min_value=0, max_value=30, value=0, key=f"{mode}_set1_g2_{i}")
-                with set1_col3:
-                    if set1_g1 > set1_g2:
-                        st.success(f"✅ {g1} wins Set 1")
-                    elif set1_g2 > set1_g1:
-                        st.success(f"✅ {g2} wins Set 1")
-                    else:
-                        st.info("Set 1: Tie or not played")
-                
-                # Set 2
-                set2_col1, set2_col2, set2_col3 = st.columns([1, 1, 2])
-                with set2_col1:
-                    set2_g1 = st.number_input(f"Set 2 - {g1}", min_value=0, max_value=30, value=0, key=f"{mode}_set2_g1_{i}")
-                with set2_col2:
-                    set2_g2 = st.number_input(f"Set 2 - {g2}", min_value=0, max_value=30, value=0, key=f"{mode}_set2_g2_{i}")
-                with set2_col3:
-                    if set2_g1 > set2_g2:
-                        st.success(f"✅ {g1} wins Set 2")
-                    elif set2_g2 > set2_g1:
-                        st.success(f"✅ {g2} wins Set 2")
-                    else:
-                        st.info("Set 2: Tie or not played")
-                
-                # Check if match is already decided (someone won 2 sets)
-                sets_won_g1_so_far = sum([1 for s1, s2 in [(set1_g1, set1_g2), (set2_g1, set2_g2)] if s1 > s2])
-                sets_won_g2_so_far = sum([1 for s1, s2 in [(set1_g1, set1_g2), (set2_g1, set2_g2)] if s2 > s1])
-                
-                match_decided = sets_won_g1_so_far == 2 or sets_won_g2_so_far == 2
-                
-                # Set 3 (conditionally disabled)
-                set3_col1, set3_col2, set3_col3 = st.columns([1, 1, 2])
-                with set3_col1:
-                    set3_g1 = st.number_input(f"Set 3 - {g1}", 
-                                            min_value=0, max_value=30, value=0, 
-                                            disabled=match_decided,
-                                            key=f"{mode}_set3_g1_{i}")
-                with set3_col2:
-                    set3_g2 = st.number_input(f"Set 3 - {g2}", 
-                                            min_value=0, max_value=30, value=0, 
-                                            disabled=match_decided,
-                                            key=f"{mode}_set3_g2_{i}")
-                with set3_col3:
-                    if match_decided:
-                        st.info("🚫 Set 3 not needed - match already decided")
-                    elif set3_g1 > set3_g2:
-                        st.success(f"✅ {g1} wins Set 3")
-                    elif set3_g2 > set3_g1:
-                        st.success(f"✅ {g2} wins Set 3")
-                    else:
-                        st.info("Set 3: Tie or not played")
-                
-                # Calculate and display match result
-                winner, points, total_sets_g1, total_sets_g2 = calculate_match_result(
-                    set1_g1, set1_g2, set2_g1, set2_g2, set3_g1, set3_g2
-                )
-                
-                # Match result preview
-                st.divider()
-                if winner == "g1":
-                    st.success(f"🏆 **Preview**: {g1} wins this match! ({total_sets_g1}-{total_sets_g2}) - {points} points")
-                elif winner == "g2":
-                    st.success(f"🏆 **Preview**: {g2} wins this match! ({total_sets_g2}-{total_sets_g1}) - {points} points")
-                else:
-                    st.warning("⏳ Match incomplete or tied - cannot submit yet")
-                
-                # Individual match submit button
-                col1, col2 = st.columns([1, 3])
-                with col1:
-                    submit_enabled = winner is not None and len(p1) == 2 and len(p2) == 2
-                    
-                    # Edit reason field for edit mode
-                    edit_reason = ""
-                    if mode == "edit":
-                        edit_reason = st.text_input(f"Reason for edit (Match {i+1})", key=f"edit_reason_{i}", 
-                                                  placeholder="e.g., Score correction, Player change")
-                    
-                    if st.button(f"✅ {'Update' if mode == 'edit' else 'Submit'} Match #{i+1}", 
-                               type="primary", 
-                               disabled=not submit_enabled,
-                               key=f"{mode}_submit_match_{i}"):
-                        # Record the match
-                        match_data = {
-                            'winner': winner,
-                            'winner_display': g1 if winner == 'g1' else g2,
-                            'points': points,
-                            'score_display': f"({total_sets_g1}-{total_sets_g2})" if winner == 'g1' else f"({total_sets_g2}-{total_sets_g1})",
-                            'set_scores': {
-                                'set1': (set1_g1, set1_g2),
-                                'set2': (set2_g1, set2_g2),
-                                'set3': (set3_g1, set3_g2) if not match_decided else (0, 0)
-                            },
-                            'players': {
-                                'g1': p1,
-                                'g2': p2
-                            },
-                            'match_info': {
-                                'match_number': i+1,
-                                'timestamp': datetime.now().isoformat(),
-                                'recorder': get_current_user()
-                            }
-                        }
-                        
-                        # For edit mode, log the change
-                        if mode == "edit":
-                            original_data = st.session_state.get(f"original_match_{current_clash_key}_{i}", {})
-                            log_clash_edit(
-                                current_clash_key, 
-                                i+1, 
-                                "match_edit", 
-                                original_data, 
-                                match_data,
-                                edit_reason
-                            )
-                        
-                        st.session_state[session_key][i] = match_data
-                        st.success(f"✅ Match #{i+1} {'updated' if mode == 'edit' else 'recorded'} successfully!")
-                        st.rerun()
-                
-                with col2:
-                    if not submit_enabled:
-                        missing_items = []
-                        if len(p1) != 2:
-                            missing_items.append(f"{g1} needs 2 players")
-                        if len(p2) != 2:
-                            missing_items.append(f"{g2} needs 2 players")
-                        if winner is None:
-                            missing_items.append("Complete match scoring")
-                        st.warning(f"⚠️ To submit: {', '.join(missing_items)}")
-    
-    # Display current clash summary
-    st.divider()
-    st.subheader("📊 Current Clash Summary")
-    
-    col1, col2, col3 = st.columns(3)
+    # Step 1: Select Groups
+    col1, col2 = st.columns(2)
     with col1:
-        st.metric(f"{g1} Match Wins", g1_match_wins)
-        st.metric(f"{g1} Points", g1_clash_points)
-    with col2:
-        st.metric("Matches Recorded", len(st.session_state[session_key]), "out of 5")
-    with col3:
-        st.metric(f"{g2} Match Wins", g2_match_wins)
-        st.metric(f"{g2} Points", g2_clash_points)
-    
-    if g1_match_wins > g2_match_wins:
-        st.success(f"🏆 **{g1} is currently leading the clash!**")
-    elif g2_match_wins > g1_match_wins:
-        st.success(f"🏆 **{g2} is currently leading the clash!**")
-    else:
-        st.info("🤝 Clash is currently tied!")
-
-    # Final submission button (only appears when all matches are recorded)
-    if len(st.session_state[session_key]) == 5:
-        button_text = "🏆 Finalize Clash Changes" if mode == "edit" else "🏆 Finalize Clash Results"
+        st.markdown("**Select Team 1:**")
+        group_options = [st.session_state.group_names.get(key, key) for key in st.session_state.groups.keys() if st.session_state.groups[key]]
+        group_keys = [key for key in st.session_state.groups.keys() if st.session_state.groups[key]]
         
-        if mode == "edit":
-            final_edit_reason = st.text_input("Overall reason for clash edit:", 
-                                            placeholder="e.g., Multiple score corrections needed")
-        
-        if st.button(button_text, type="primary", help="Submit all recorded matches to standings"):
-            if mode == "edit":
-                # Log the overall clash edit
-                original_clash_data = st.session_state.tournament_data.get(current_clash_key, [])
-                new_clash_data = list(st.session_state[session_key].values())
-                
-                log_clash_edit(
-                    current_clash_key,
-                    "all",
-                    "clash_finalize_edit",
-                    original_clash_data,
-                    new_clash_data,
-                    final_edit_reason if 'final_edit_reason' in locals() else ""
-                )
-                
-                # Update tournament data with edited results
-                st.session_state.tournament_data[current_clash_key] = new_clash_data
-                
-                # Clear edit session
-                del st.session_state[session_key]
-                
-            else:
-                # Update Standings (existing logic for new clashes)
-                if g1_match_wins > g2_match_wins:
-                    st.session_state.standings.at[g1, "Clash Wins"] += 1
-                elif g2_match_wins > g1_match_wins:
-                    st.session_state.standings.at[g2, "Clash Wins"] += 1
-                
-                st.session_state.standings.at[g1, "Total Points"] += g1_clash_points
-                st.session_state.standings.at[g2, "Total Points"] += g2_clash_points
-                
-                # Store in tournament_data
-                st.session_state.tournament_data[current_clash_key] = list(st.session_state[session_key].values())
-                
-                # Clear recorded matches for this clash
-                del st.session_state[session_key]
+        if not group_options:
+            st.error("No groups with players found. Please set up teams first.")
+            return
             
-            auto_save()
-            st.balloons()
-            success_msg = f"🎉 Clash {'updated' if mode == 'edit' else 'finalized'}! {g1}: {g1_clash_points} points | {g2}: {g2_clash_points} points"
-            st.success(success_msg)
-            st.rerun()
+        g1_display = st.selectbox("Team 1", group_options, key="match_g1")
+        g1 = group_keys[group_options.index(g1_display)]
+        
+    with col2:
+        st.markdown("**Select Team 2:**")
+        g2_display = st.selectbox("Team 2", group_options, key="match_g2")
+        g2 = group_keys[group_options.index(g2_display)]
+
+    if g1 == g2:
+        st.error("Please select two different teams.")
+        return
+    
+    # Step 2: Select Subgroups (if applicable)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**{g1_display} Subgroup:**")
+        subgroup_options = list(st.session_state.subgroup_names.values()) + ["All Players"]
+        subgroup_keys = list(st.session_state.subgroup_names.keys()) + ["all"]
+        g1_sub = st.selectbox(f"{g1_display} players from", subgroup_options, key="g1_subgroup")
+        g1_sub_key = subgroup_keys[subgroup_options.index(g1_sub)]
+        
+    with col2:
+        st.markdown(f"**{g2_display} Subgroup:**")
+        g2_sub = st.selectbox(f"{g2_display} players from", subgroup_options, key="g2_subgroup")
+        g2_sub_key = subgroup_keys[subgroup_options.index(g2_sub)]
+    
+    # Get filtered players
+    def get_subgroup_players(group_name, subgroup_key):
+        if subgroup_key == "all":
+            return st.session_state.groups.get(group_name, [])
+        
+        if not hasattr(st.session_state, 'detailed_groups') or not st.session_state.detailed_groups:
+            return st.session_state.groups.get(group_name, [])
+        
+        group_subgroups = st.session_state.detailed_groups.get(group_name, {})
+        subgroup_data = group_subgroups.get(subgroup_key, {})
+        players = subgroup_data.get('players', st.session_state.groups.get(group_name, []))
+        
+        # Extract player names from objects if they are stored as dictionaries
+        if players and isinstance(players[0], dict):
+            return [player['name'] for player in players if 'name' in player]
+        else:
+            return players
+    
+    g1_players = get_subgroup_players(g1, g1_sub_key)
+    g2_players = get_subgroup_players(g2, g2_sub_key)
+    
+    if len(g1_players) < 2:
+        st.error(f"{g1_display} needs at least 2 players in selected subgroup.")
+        return
+    if len(g2_players) < 2:
+        st.error(f"{g2_display} needs at least 2 players in selected subgroup.")
+        return
+    
+    st.divider()
+    
+    # Step 3: Select Players
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**{g1_display} Pair:**")
+        g1_p1 = st.selectbox(f"{g1_display} Player 1", g1_players, key="g1_p1")
+        remaining_g1 = [p for p in g1_players if p != g1_p1]
+        g1_p2 = st.selectbox(f"{g1_display} Player 2", remaining_g1, key="g1_p2")
+        
+    with col2:
+        st.markdown(f"**{g2_display} Pair:**")
+        g2_p1 = st.selectbox(f"{g2_display} Player 1", g2_players, key="g2_p1")
+        remaining_g2 = [p for p in g2_players if p != g2_p1]
+        g2_p2 = st.selectbox(f"{g2_display} Player 2", remaining_g2, key="g2_p2")
+    
+    st.divider()
+    
+    # Step 4: Enter Match Scores
+    st.markdown("**📊 Match Score Entry**")
+    col1, col2, col3 = st.columns(3)
+    
+    # Set 1
+    with col1:
+        st.markdown("**Set 1**")
+        set1_g1 = st.number_input(f"{g1_display}", min_value=0, max_value=30, value=0, key="set1_g1")
+        set1_g2 = st.number_input(f"{g2_display}", min_value=0, max_value=30, value=0, key="set1_g2")
+    
+    # Set 2
+    with col2:
+        st.markdown("**Set 2**")
+        set2_g1 = st.number_input(f"{g1_display}", min_value=0, max_value=30, value=0, key="set2_g1")
+        set2_g2 = st.number_input(f"{g2_display}", min_value=0, max_value=30, value=0, key="set2_g2")
+    
+    # Set 3 (if needed)
+    set_1_winner = g1 if set1_g1 > set1_g2 else g2 if set1_g2 > set1_g1 else None
+    set_2_winner = g1 if set2_g1 > set2_g2 else g2 if set2_g2 > set2_g1 else None
+    
+    match_decided = (set_1_winner == set_2_winner and set_1_winner is not None)
+    
+    with col3:
+        st.markdown("**Set 3** (if needed)")
+        if match_decided:
+            st.info("Match decided in 2 sets")
+            set3_g1 = 0
+            set3_g2 = 0
+        else:
+            set3_g1 = st.number_input(f"{g1_display}", min_value=0, max_value=30, value=0, key="set3_g1")
+            set3_g2 = st.number_input(f"{g2_display}", min_value=0, max_value=30, value=0, key="set3_g2")
+    
+    # Calculate winner and points
+    sets_won_g1 = (set1_g1 > set1_g2) + (set2_g1 > set2_g2) + (set3_g1 > set3_g2)
+    sets_won_g2 = (set1_g2 > set1_g1) + (set2_g2 > set2_g1) + (set3_g2 > set3_g1)
+    
+    winner = None
+    points = 0
+    if sets_won_g1 > sets_won_g2:
+        winner = g1
+        points = 2 if sets_won_g1 == 2 and sets_won_g2 == 0 else 1
+    elif sets_won_g2 > sets_won_g1:
+        winner = g2
+        points = 2 if sets_won_g2 == 2 and sets_won_g1 == 0 else 1
+    
+    # Match summary
+    st.divider()
+    if winner:
+        winner_display = g1_display if winner == g1 else g2_display
+        st.success(f"🏆 **Winner:** {winner_display} ({sets_won_g1 if winner == g1 else sets_won_g2}-{sets_won_g2 if winner == g1 else sets_won_g1}) - {points} points")
     else:
-        remaining = 5 - len(st.session_state[session_key])
-        st.info(f"📝 {'Update' if mode == 'edit' else 'Record'} {remaining} more match(es) to finalize the clash")
+        st.warning("⚠️ Please complete the score entry to determine winner")
+    
+    # Submit button
+    submit_enabled = winner is not None and (set1_g1 > 0 or set1_g2 > 0)
+    
+    if st.button("✅ Record Match", type="primary", disabled=not submit_enabled):
+        # Create match record
+        match_record = {
+            'match_id': f"{g1}_{g2}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            'team1': g1,
+            'team2': g2, 
+            'team1_display': g1_display,
+            'team2_display': g2_display,
+            'team1_players': [g1_p1, g1_p2],
+            'team2_players': [g2_p1, g2_p2],
+            'team1_subgroup': g1_sub,
+            'team2_subgroup': g2_sub,
+            'set_scores': {
+                'set1': (set1_g1, set1_g2),
+                'set2': (set2_g1, set2_g2),
+                'set3': (set3_g1, set3_g2) if not match_decided else None
+            },
+            'winner': winner,
+            'sets_won_team1': sets_won_g1,
+            'sets_won_team2': sets_won_g2,
+            'match_points': points,
+            'recorded_by': get_current_user(),
+            'recorded_at': datetime.now().isoformat(),
+            'score_display': f"({sets_won_g1}-{sets_won_g2})"
+        }
+        
+        # Store in session state for individual matches
+        # Add match using the new CRUD function
+        add_match(match_record)
+        
+        # Update standings
+        updated_standings = calculate_standings_from_matches()
+        if not updated_standings.empty:
+            st.session_state.standings = updated_standings.set_index('Team')
+        
+        # Save data
+        auto_save()
+        
+        st.success("🎉 Match recorded successfully!")
+        st.success("📊 Standings updated!")
+        st.balloons()
+        st.rerun()
+
 
 # --- MAIN MENU STRUCTURE ---
 if menu == "Player Import & Auto-Balance":
@@ -2008,6 +2447,17 @@ if menu == "Player Import & Auto-Balance":
             # Create balanced groups button
             if st.button("🎯 Create Balanced Groups", type="primary", help="This will redistribute all players into balanced groups"):
                 with st.spinner("Creating balanced groups... This may take a moment."):
+                    # Clear existing groups to ensure fresh redistribution
+                    st.session_state.groups = {}
+                    if hasattr(st.session_state, 'detailed_groups'):
+                        st.session_state.detailed_groups = {}
+                    
+                    # Reset player assignments in database
+                    if 'group' in st.session_state.player_database.columns:
+                        st.session_state.player_database['group'] = None
+                    if 'assigned' in st.session_state.player_database.columns:
+                        st.session_state.player_database['assigned'] = False
+                    
                     if balance_strategy == "Skill-Level Subgroups":
                         # Validate subgroup ranges
                         if subgroup1_max >= subgroup2_min:
@@ -2028,6 +2478,7 @@ if menu == "Player Import & Auto-Balance":
                                 subgroup1_min, subgroup1_max, 
                                 subgroup2_min, subgroup2_max,
                                 subgroup1_count, subgroup2_count, num_groups,
+                                force_rebalance=True,  # Force complete redistribution
                                 **gender_constraints
                             )
                             
@@ -2045,10 +2496,11 @@ if menu == "Player Import & Auto-Balance":
                             balanced_groups = auto_balance_groups(
                                 st.session_state.player_database,
                                 min_females_per_group=min_females if 'min_females' in locals() else None,
-                                max_females_per_group=max_females if 'max_females' in locals() else None
+                                max_females_per_group=max_females if 'max_females' in locals() else None,
+                                force_rebalance=True  # Force complete redistribution
                             )
                         else:
-                            balanced_groups = auto_balance_groups(st.session_state.player_database)
+                            balanced_groups = auto_balance_groups(st.session_state.player_database, force_rebalance=True)
                     
                     # Update session state for both strategies
                     st.session_state.groups = {}
@@ -2318,10 +2770,13 @@ elif menu == "Setup Groups & Players":
     col1, col2, col3 = st.columns(3)
     
     # Display group name inputs in columns
-    for i, (group_key, current_name) in enumerate(st.session_state.group_names.items()):
+    group_items = list(st.session_state.group_names.items())
+    for i, (group_key, current_name) in enumerate(group_items):
         col = [col1, col2, col3][i % 3]
         with col:
-            new_name = st.text_input(f"Group {chr(65+i)} Name:", value=current_name, key=f"group_name_{i}")
+            # Extract the letter from the group key for display (e.g., "Group A" -> "A")
+            group_letter = group_key.split()[-1] if ' ' in group_key else group_key
+            new_name = st.text_input(f"{group_key} Name:", value=current_name, key=f"group_name_{group_key}")
             if new_name.strip() and new_name != current_name:
                 # Update group name and transfer data
                 old_key = group_key
@@ -2389,12 +2844,16 @@ elif menu == "Setup Groups & Players":
     st.subheader("👥 Players Configuration")
     st.info("Add 10 players to each group. You can copy-paste names or enter them manually.")
     
-    # Create tabs for each group
-    group_tabs = st.tabs([st.session_state.group_names[f"Group {chr(65+i)}"] for i in range(6)])
+    # Create tabs for each group - use existing groups only
+    existing_groups = [(key, name) for key, name in st.session_state.group_names.items() if key in st.session_state.groups]
+    if not existing_groups:
+        st.error("No groups configured. Please set up groups first.")
+        st.stop()
+    
+    group_tabs = st.tabs([name for key, name in existing_groups])
     
     for i, tab in enumerate(group_tabs):
-        group_key = f"Group {chr(65+i)}"
-        group_name = st.session_state.group_names[group_key]
+        group_key, group_name = existing_groups[i]
         
         with tab:
             st.markdown(f"### Players for {group_name}")
@@ -3095,18 +3554,46 @@ elif menu == "Match Schedule":
 elif menu == "Standings & Qualifiers":
     st.header("🏆 Tournament Standings & Qualification")
     
-    if not st.session_state.tournament_data and st.session_state.standings.sum().sum() == 0:
-        st.info("📝 No tournament matches recorded yet. Please record some clashes first!")
+    # Check if we have any match data (individual matches or legacy clash data)
+    individual_matches = st.session_state.get('individual_matches', [])
+    legacy_data = st.session_state.get('tournament_data', {})
+    
+    if not individual_matches and not legacy_data:
+        st.info("📝 No tournament matches recorded yet. Please record some matches first!")
+        st.info("💡 Go to **'Record a Clash'** to start recording individual match results.")
     else:
-        standings_df = calculate_standings()
+        # Use appropriate calculation method based on available data
+        if individual_matches:
+            standings_df = calculate_standings_from_matches()
+            st.success(f"📊 Displaying standings from {len(individual_matches)} individual matches")
+        else:
+            standings_df = calculate_standings()  # Legacy calculation for backward compatibility
+            st.info("📊 Displaying standings from legacy clash data")
         
         if not standings_df.empty:
             st.subheader("📊 Current Standings")
             # Display standings table with better formatting
             standings_display = standings_df.copy()
+            
+            # Format the display based on data type
+            if 'Rank' in standings_display.columns:
+                standings_display['Rank'] = standings_display['Rank'].astype(str) + '.' 
+            
             st.dataframe(standings_display, use_container_width=True, hide_index=True)
             
-            # Qualification analysis
+            # Show match summary
+            if individual_matches:
+                st.subheader("📋 Recent Matches")
+                recent_matches = sorted(individual_matches, key=lambda x: x['recorded_at'], reverse=True)[:5]
+                
+                for match in recent_matches:
+                    winner_display = st.session_state.group_names.get(match['winner'], match['winner'])
+                    loser = match['team1'] if match['winner'] == match['team2'] else match['team2'] 
+                    loser_display = st.session_state.group_names.get(loser, loser)
+                    
+                    st.write(f"🏆 **{winner_display}** def. {loser_display} {match['score_display']} ({match['match_points']} pts) - {match['recorded_at'][:19]}")
+            
+            # Qualification analysis (adapted for individual matches)
             st.subheader("🎯 Qualification Analysis")
             
             total_teams = len(standings_df)
@@ -3120,30 +3607,46 @@ elif menu == "Standings & Qualifiers":
                 with col1:
                     st.success("✅ **QUALIFIED TEAMS**")
                     for idx, team in qualified_teams.iterrows():
-                        st.write(f"🥇 **{team['Team']}** - {team['Points']} pts ({team['Wins']}W-{team['Losses']}L)")
+                        if individual_matches:
+                            st.write(f"🥇 **{team['Team']}** - {team['Points']} pts ({team['Wins']}-{team['Losses']} record)")
+                        else:
+                            st.write(f"🥇 **{team['Team']}** - {team['Points']} pts ({team['Clash Wins']}CW-{team['Clash Losses']}CL)")
                 
                 with col2:
                     st.error("❌ **ELIMINATED TEAMS**")
                     for idx, team in eliminated_teams.iterrows():
-                        st.write(f"💔 **{team['Team']}** - {team['Points']} pts ({team['Wins']}W-{team['Losses']}L)")
-                        
-                # Tournament completion check
-                matches_played = sum(len(matches) for matches in st.session_state.tournament_data.values())
-                total_possible_matches = len(st.session_state.groups) * (len(st.session_state.groups) - 1) // 2
-                
-                if matches_played == total_possible_matches:
-                    st.balloons()
-                    st.success(f"🎉 **TOURNAMENT COMPLETE!** All {total_possible_matches} matches played!")
-                    
-                    # Final rankings
-                    st.subheader("🏆 Final Tournament Rankings")
-                    for idx, team in standings_display.iterrows():
-                        if idx == 0:
-                            st.write(f"🥇 **CHAMPION: {team['Team']}** - {team['Points']} points")
-                        elif idx == 1:
-                            st.write(f"🥈 **RUNNER-UP: {team['Team']}** - {team['Points']} points")
+                        if individual_matches:
+                            st.write(f"💔 **{team['Team']}** - {team['Points']} pts ({team['Wins']}-{team['Losses']} record)")
                         else:
-                            st.write(f"#{idx+1} **{team['Team']}** - {team['Points']} points")
+                            st.write(f"💔 **{team['Team']}** - {team['Points']} pts ({team['Clash Wins']}CW-{team['Clash Losses']}CL)")
+                        
+                # Tournament completion check (adapted for individual match system)
+                if individual_matches:
+                    total_matches = len(individual_matches)
+                    st.info(f"📊 **Tournament Progress:** {total_matches} individual matches recorded")
+                    
+                    # Check if we have a clear winner 
+                    top_team = standings_display.iloc[0]
+                    if top_team['Wins'] >= 3:  # Threshold for declaring winner
+                        st.balloons()
+                        st.success(f"🎉 **POTENTIAL TOURNAMENT LEADER!** {top_team['Team']} is dominating with {top_team['Wins']} wins!")
+                else:
+                    # Legacy tournament completion check
+                    matches_played = sum(len(matches) for matches in legacy_data.values())
+                    if matches_played > 0:
+                        st.info(f"📊 **Tournament Progress:** {matches_played} clash matches from legacy system")
+                    
+                # Final rankings display
+                st.subheader("🏆 Current Tournament Rankings")
+                for idx, team in standings_display.head(6).iterrows():  # Show top 6
+                    if idx == 0:
+                        st.write(f"🥇 **{team['Team']}** - {team['Points']} points")
+                    elif idx == 1:
+                        st.write(f"🥈 **{team['Team']}** - {team['Points']} points")
+                    elif idx == 2:
+                        st.write(f"🥉 **{team['Team']}** - {team['Points']} points")
+                    else:
+                        st.write(f"#{idx+1} **{team['Team']}** - {team['Points']} points")
             else:
                 st.warning("⚠️ Need at least 4 teams for qualification analysis")
         else:
@@ -3162,29 +3665,30 @@ elif menu == "Record a Clash":
         st.error("🚫 Access Denied. Only administrators can record clashes.")
         st.stop()
     
-    st.header("⚔️ Record & Manage Group Clashes")
+    st.header("🏸 Record & Manage Individual Matches")
+    st.info("💡 **New Simplified Approach**: Record one doubles match at a time with easy player selection and score entry.")
     
     # Tabs for different actions
     if user_role == 'superuser':
-        tab1, tab2, tab3 = st.tabs(["🆕 Record New Clash", "✏️ Edit Clash Results", "📜 Edit History"])
+        tab1, tab2, tab3 = st.tabs(["🆕 Record Match", "📝 Manage Matches", "📜 Edit History"])
     else:
-        tab1, tab2, tab3 = st.tabs(["🆕 Record New Clash", "👁️ View Results", "🚫 Admin Only"])
+        tab1, tab2, tab3 = st.tabs(["🆕 Record Match", "👁️ View Results", "🚫 Admin Only"])
     
     with tab1:
-        st.subheader("Record New Clash")
-        record_new_clash()
+        st.subheader("Record New Match")
+        record_new_clash()  # This now calls the simplified single match interface
     
     with tab2:
         if user_role == 'superuser':
-            st.subheader("Edit Clash Results")
-            edit_clash_results()
+            st.subheader("Manage Match Records")
+            edit_clash_results()  # This now calls the match management interface
         else:
-            st.subheader("View Recorded Results")
-            view_clash_results()
+            st.subheader("View Match Results")
+            view_clash_results()  # This now shows individual match results
     
     with tab3:
         if user_role == 'superuser':
-            st.subheader("Clash Edit History")
+            st.subheader("Match Edit History")
             show_edit_history()
         else:
             st.error("🚫 Only superusers can view edit history")
