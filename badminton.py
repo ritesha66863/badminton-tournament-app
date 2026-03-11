@@ -148,9 +148,14 @@ def save_tournament_data():
                 st.warning(f"Warning: Could not save standings properly: {str(e)}")
         
         # Save other data including users (excluding matches - they have their own file now)
+        # Handle subgroup_names carefully to prevent empty dict issues
+        subgroup_names = st.session_state.get('subgroup_names', {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'})
+        if not subgroup_names:  # Handle empty dict case
+            subgroup_names = {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'}
+        
         tournament_data = {
             'group_names': st.session_state.get('group_names', {}),
-            'subgroup_names': st.session_state.get('subgroup_names', {}),
+            'subgroup_names': subgroup_names,
             'groups': st.session_state.get('groups', {}),
             'detailed_groups': st.session_state.get('detailed_groups', {}),
             'standings': standings_to_save,
@@ -165,6 +170,56 @@ def save_tournament_data():
     except Exception as e:
         st.error(f"Error saving data: {str(e)}")
 
+def calculate_standings_from_matches():
+    """Calculate standings from individual match records"""
+    if 'individual_matches' not in st.session_state:
+        load_matches()  # Load matches from file
+    
+    standings_data = []
+    
+    # Calculate standings for each group
+    for group_name in st.session_state.groups.keys():
+        wins = 0
+        losses = 0
+        total_points = 0
+        matches_played = 0
+        
+        # Count from individual matches
+        for match in st.session_state.individual_matches:
+            if match['team1'] == group_name:
+                matches_played += 1
+                if match['winner'] == group_name:
+                    wins += 1
+                    total_points += match['match_points']
+                else:
+                    losses += 1
+            elif match['team2'] == group_name:
+                matches_played += 1
+                if match['winner'] == group_name:
+                    wins += 1
+                    total_points += match['match_points']
+                else:
+                    losses += 1
+        
+        standings_data.append({
+            'Team': st.session_state.group_names.get(group_name, group_name),
+            'Matches Played': matches_played,
+            'Wins': wins,
+            'Losses': losses,
+            'Points': total_points,
+            'Win Rate': f"{(wins/matches_played*100):.1f}%" if matches_played > 0 else "0.0%"
+        })
+    
+    # Create DataFrame and sort by wins, then points
+    df = pd.DataFrame(standings_data)
+    if not df.empty:
+        df = df.sort_values(['Wins', 'Points'], ascending=[False, False]).reset_index(drop=True)
+        
+        # Add rank column
+        df.insert(0, 'Rank', range(1, len(df) + 1))
+    
+    return df
+
 def load_tournament_data():
     """Load tournament data from JSON files"""
     try:
@@ -177,7 +232,7 @@ def load_tournament_data():
                 'name': [f'Player {i+1}' for i in range(60)],
                 'gender': ['M' if i % 3 != 0 else 'F' for i in range(60)],
                 'email': [f'player{i+1}@example.com' for i in range(60)],
-                'skill_level': [random.randint(1, 10) for _ in range(60)],
+                'skill_level': [random.randint(1, 15) for _ in range(60)],
                 'group': [f"Group {chr(65+(i//10))}" for i in range(60)],
                 'assigned': [True] * 60
             })
@@ -254,8 +309,9 @@ def load_tournament_data():
                     calculated_standings = calculate_standings()
                     if not calculated_standings.empty:
                         st.session_state.standings = calculated_standings.set_index('Team')
-        except:
-            # Initialize defaults if file doesn't exist
+                        
+        except FileNotFoundError:
+            # Initialize defaults if tournament_data.json doesn't exist
             default_groups = [f"Group {chr(65+i)}" for i in range(6)]
             default_names = ["Warriors", "Champions", "Legends", "Heroes", "Titans", "Gladiators"]
             
@@ -268,6 +324,25 @@ def load_tournament_data():
             # Initialize individual matches from file or create empty
             load_matches()
             st.session_state.detailed_groups = {}  # Initialize empty detailed groups
+            st.session_state.standings = pd.DataFrame({
+                "Team": default_groups,
+                "Clash Wins": [0]*6,
+                "Total Points": [0]*6
+            }).set_index("Team")
+        except json.JSONDecodeError:
+            # Handle corrupted JSON file
+            st.error("⚠️ tournament_data.json is corrupted. Creating new default settings.")
+            default_groups = [f"Group {chr(65+i)}" for i in range(6)]
+            default_names = ["Warriors", "Champions", "Legends", "Heroes", "Titans", "Gladiators"]
+            
+            st.session_state.group_names = {group: name for group, name in zip(default_groups, default_names)}
+            st.session_state.subgroup_names = {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'}
+            st.session_state.groups = {group: [] for group in default_groups}
+            st.session_state.users = {}
+            st.session_state.clash_edit_history = []
+            st.session_state.tournament_data = {}
+            load_matches()
+            st.session_state.detailed_groups = {}
             st.session_state.standings = pd.DataFrame({
                 "Team": default_groups,
                 "Clash Wins": [0]*6,
@@ -337,14 +412,41 @@ def clear_all_matches():
     st.session_state.individual_matches = []
     save_matches()
 
-def auto_save():
-    """Save individual matches to separate JSON file"""
-    try:
-        matches = st.session_state.get('individual_matches', [])
-        with open('matches.json', 'w') as f:
-            json.dump(matches, f, indent=2)
-    except Exception as e:
-        st.error(f"Error saving matches: {str(e)}")
+def have_players_played_together(player1, player2):
+    """Check if two specific players have already played against each other"""
+    if 'individual_matches' not in st.session_state:
+        load_matches()
+    
+    for match in st.session_state.get('individual_matches', []):
+        team1_players = match.get('team1_players', [])
+        team2_players = match.get('team2_players', [])
+        
+        # Check if player1 and player2 are on opposite teams in any recorded match
+        if ((player1 in team1_players and player2 in team2_players) or 
+            (player1 in team2_players and player2 in team1_players)):
+            return True
+    
+    return False
+
+def get_eligible_opponents(selected_player, opponent_group_players):
+    """Get list of players from opponent group who haven't played against the selected player"""
+    if not selected_player or not opponent_group_players:
+        return opponent_group_players
+    
+    eligible = []
+    for opponent in opponent_group_players:
+        if not have_players_played_together(selected_player, opponent):
+            eligible.append(opponent)
+    
+    return eligible
+
+def get_played_against_info(player, potential_opponents):
+    """Get information about who a player has already played against from a list of potential opponents"""
+    played_against = []
+    for opponent in potential_opponents:
+        if have_players_played_together(player, opponent):
+            played_against.append(opponent)
+    return played_against
 
 def load_matches():
     """Load individual matches from JSON file"""
@@ -493,12 +595,32 @@ if 'initialized' not in st.session_state:
     # Load existing data first (including users)
     load_tournament_data()
     
-    # Ensure subgroup names are always initialized
+    # Debug: Check if subgroup_names were loaded correctly
     if 'subgroup_names' not in st.session_state:
+        # This should only happen if there was an error loading or no data exists
+        st.error("🚨 Critical: Subgroup names not found in session state after loading!")
+        st.info("Initializing with defaults. Please check tournament_data.json for issues.")
         st.session_state.subgroup_names = {
             'subgroup1': '1 (Lower)',
             'subgroup2': '2 (Higher)'
         }
+        # Force save the defaults
+        auto_save()
+    else:
+        # Validate that loaded subgroup_names are not empty
+        if not st.session_state.subgroup_names or not isinstance(st.session_state.subgroup_names, dict):
+            st.error("🚨 Critical: Invalid subgroup_names loaded from file!")
+            st.session_state.subgroup_names = {
+                'subgroup1': '1 (Lower)',
+                'subgroup2': '2 (Higher)'
+            }
+            auto_save()
+        else:
+            # Ensure required keys exist
+            if 'subgroup1' not in st.session_state.subgroup_names:
+                st.session_state.subgroup_names['subgroup1'] = '1 (Lower)'
+            if 'subgroup2' not in st.session_state.subgroup_names:
+                st.session_state.subgroup_names['subgroup2'] = '2 (Higher)'
     
     # Then initialize user system (will only add missing default users)
     initialize_users()
@@ -1344,56 +1466,6 @@ def calculate_group_stats(group_players):
         "total_skill": total_skill
     }
 
-def calculate_standings_from_matches():
-    """Calculate standings from individual match records"""
-    if 'individual_matches' not in st.session_state:
-        load_matches()  # Load matches from file
-    
-    standings_data = []
-    
-    # Calculate standings for each group
-    for group_name in st.session_state.groups.keys():
-        wins = 0
-        losses = 0
-        total_points = 0
-        matches_played = 0
-        
-        # Count from individual matches
-        for match in st.session_state.individual_matches:
-            if match['team1'] == group_name:
-                matches_played += 1
-                if match['winner'] == group_name:
-                    wins += 1
-                    total_points += match['match_points']
-                else:
-                    losses += 1
-            elif match['team2'] == group_name:
-                matches_played += 1
-                if match['winner'] == group_name:
-                    wins += 1
-                    total_points += match['match_points']
-                else:
-                    losses += 1
-        
-        standings_data.append({
-            'Team': st.session_state.group_names.get(group_name, group_name),
-            'Matches Played': matches_played,
-            'Wins': wins,
-            'Losses': losses,
-            'Points': total_points,
-            'Win Rate': f"{(wins/matches_played*100):.1f}%" if matches_played > 0 else "0.0%"
-        })
-    
-    # Create DataFrame and sort by wins, then points
-    df = pd.DataFrame(standings_data)
-    if not df.empty:
-        df = df.sort_values(['Wins', 'Points'], ascending=[False, False]).reset_index(drop=True)
-        
-        # Add rank column
-        df.insert(0, 'Rank', range(1, len(df) + 1))
-    
-    return df
-
 def manage_recorded_matches():
     """Display and manage all recorded matches"""
     if 'individual_matches' not in st.session_state:
@@ -1424,9 +1496,11 @@ def manage_recorded_matches():
                 
                 # Set by set breakdown
                 st.markdown("**Set Scores:**")
-                for set_num, (s1, s2) in enumerate(match['set_scores'].values(), 1):
-                    if match['set_scores'][f'set{set_num}'] is not None:
-                        st.write(f"Set {set_num}: {s1}-{s2}")
+                # Filter out None values before unpacking
+                valid_sets = [(key, value) for key, value in match['set_scores'].items() if value is not None]
+                for set_key, (s1, s2) in valid_sets:
+                    set_num = set_key.replace('set', '')
+                    st.write(f"Set {set_num}: {s1}-{s2}")
             
             with col3:
                 if get_current_user_role() == 'superuser':
@@ -1766,6 +1840,16 @@ def record_single_match():
     st.subheader("📝 Record a Single Match")
     st.info("💡 Record one doubles match at a time for accurate tracking")
     
+    # Show matchup restriction info
+    with st.expander("🛡️ Matchup Restriction Rules", expanded=False):
+        st.markdown("""
+        **Fairness Rules:**
+        - Each player from one group can play against players from another group **only once**
+        - This ensures fair competition and prevents repeated matchups
+        - The system automatically filters opponent lists to show only eligible players
+        - If no eligible opponents are available, try selecting different players or subgroups
+        """)
+    
     # Step 1: Select Groups
     col1, col2 = st.columns(2)
     with col1:
@@ -1833,7 +1917,7 @@ def record_single_match():
     
     st.divider()
     
-    # Step 3: Select Players
+    # Step 3: Select Players with opponent validation
     col1, col2 = st.columns(2)
     with col1:
         st.markdown(f"**{g1_display} Pair:**")
@@ -1843,9 +1927,59 @@ def record_single_match():
         
     with col2:
         st.markdown(f"**{g2_display} Pair:**")
-        g2_p1 = st.selectbox(f"{g2_display} Player 1", g2_players, key="g2_p1")
-        remaining_g2 = [p for p in g2_players if p != g2_p1]
+        
+        # Filter g2_players based on who has already played against g1 players
+        eligible_g2_for_p1 = get_eligible_opponents(g1_p1, g2_players)
+        eligible_g2_for_p2 = get_eligible_opponents(g1_p2, g2_players)
+        
+        # Get intersection - players who haven't played against either g1 player
+        eligible_g2_players = list(set(eligible_g2_for_p1) & set(eligible_g2_for_p2))
+        
+        # Show information about filtered players
+        if len(eligible_g2_players) < len(g2_players):
+            played_against_p1 = get_played_against_info(g1_p1, g2_players)
+            played_against_p2 = get_played_against_info(g1_p2, g2_players)
+            
+            with st.expander("🚫 Player Matchup Restrictions", expanded=False):
+                if played_against_p1:
+                    st.info(f"**{g1_p1}** has already played against: {', '.join(played_against_p1)}")
+                if played_against_p2:
+                    st.info(f"**{g1_p2}** has already played against: {', '.join(played_against_p2)}")
+                st.success(f"**Available opponents:** {len(eligible_g2_players)} out of {len(g2_players)} players")
+        
+        if not eligible_g2_players:
+            st.error(f"⚠️ No available players in {g2_display} subgroup. All players have already played against the selected {g1_display} players.")
+            st.info("💡 Try selecting different players from Team 1 or change the subgroup selection.")
+            return
+        elif len(eligible_g2_players) < 2:
+            st.warning(f"⚠️ Only {len(eligible_g2_players)} eligible player(s) available in {g2_display} subgroup. Need at least 2 players for a doubles match.")
+            if len(eligible_g2_players) == 1:
+                st.info(f"Available: {eligible_g2_players[0]}")
+            return
+        
+        g2_p1 = st.selectbox(f"{g2_display} Player 1", eligible_g2_players, key="g2_p1")
+        remaining_g2 = [p for p in eligible_g2_players if p != g2_p1]
         g2_p2 = st.selectbox(f"{g2_display} Player 2", remaining_g2, key="g2_p2")
+    
+    # Show previous matches between these groups/subgroups
+    with st.expander("📋 Previous Matches Between These Teams", expanded=False):
+        previous_matches = []
+        for match in st.session_state.get('individual_matches', []):
+            if ((match['team1'] == g1 and match['team2'] == g2) or 
+                (match['team1'] == g2 and match['team2'] == g1)):
+                if ((match.get('team1_subgroup') == g1_sub and match.get('team2_subgroup') == g2_sub) or
+                    (match.get('team1_subgroup') == g2_sub and match.get('team2_subgroup') == g1_sub)):
+                    previous_matches.append(match)
+        
+        if previous_matches:
+            st.write(f"**{len(previous_matches)} previous match(es) between {g1_display} ({g1_sub}) and {g2_display} ({g2_sub}):**")
+            for i, match in enumerate(previous_matches[-5:], 1):  # Show last 5 matches
+                winner_display = match['team1_display'] if match['winner'] == match['team1'] else match['team2_display']
+                players1 = ', '.join(match['team1_players'])
+                players2 = ', '.join(match['team2_players'])
+                st.write(f"  {i}. **{players1}** vs **{players2}** → {winner_display} won {match['score_display']} ({match['recorded_at'][:10]})")
+        else:
+            st.info(f"No previous matches between {g1_display} ({g1_sub}) and {g2_display} ({g2_sub})")
     
     st.divider()
     
@@ -1960,7 +2094,7 @@ if menu == "Player Import & Auto-Balance":
     import_method = st.radio("Choose import method:", ["Manual Entry", "CSV/Excel Upload", "Bulk Text Import"])
     
     if import_method == "CSV/Excel Upload":
-        st.info("Upload a CSV or Excel file with columns: name, gender (M/F), email, skill_level (1-10)")
+        st.info("Upload a CSV or Excel file with columns: name, gender (M/F), email, skill_level (1-15)")
         
         # Template download options
         template_data = {
@@ -2044,7 +2178,7 @@ if menu == "Player Import & Auto-Balance":
                     # Filter valid rows
                     valid_rows = (
                         new_players_df['gender'].isin(['M', 'F']) &
-                        new_players_df['skill_level'].between(1, 10) &
+                        new_players_df['skill_level'].between(1, 15) &
                         new_players_df['name'].notna() &
                         new_players_df['email'].notna()
                     )
@@ -2088,7 +2222,7 @@ if menu == "Player Import & Auto-Balance":
                 st.info("💡 Tip: Make sure your file has the correct format and required columns")
     
     elif import_method == "Bulk Text Import":
-        st.info("Enter players in format: Name, Gender(M/F), Email, Skill(1-10) - one per line")
+        st.info("Enter players in format: Name, Gender(M/F), Email, Skill(1-15) - one per line")
         
         bulk_input = st.text_area(
             "Enter player data:",
@@ -2105,7 +2239,7 @@ if menu == "Player Import & Auto-Balance":
                     parts = [p.strip() for p in line.split(',')]
                     if len(parts) >= 4:
                         name, gender, email, skill = parts[0], parts[1].upper(), parts[2], int(parts[3])
-                        if gender in ['M', 'F'] and 1 <= skill <= 10:
+                        if gender in ['M', 'F'] and 1 <= skill <= 15:
                             players_data.append({
                                 'name': name,
                                 'gender': gender,
@@ -2141,7 +2275,7 @@ if menu == "Player Import & Auto-Balance":
             with col3:
                 player_email = st.text_input("Email")
             with col4:
-                player_skill = st.number_input("Skill Level", min_value=1, max_value=10, value=5)
+                player_skill = st.number_input("Skill Level", min_value=1, max_value=15, value=8)
             
             if st.form_submit_button("Add Player"):
                 if player_name.strip() and player_email.strip():
@@ -2192,7 +2326,7 @@ if menu == "Player Import & Auto-Balance":
                 "skill_level": st.column_config.NumberColumn(
                     "Skill Level",
                     min_value=1,
-                    max_value=10,
+                    max_value=15,
                     step=1,
                 ),
                 "gender": st.column_config.SelectboxColumn(
@@ -2362,14 +2496,14 @@ if menu == "Player Import & Auto-Balance":
                 with col1:
                     subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
                     st.markdown(f"**{subgroup1_name}**")
-                    subgroup1_min = st.number_input("Min Skill Level:", min_value=1, max_value=10, value=1, key="sg1_min")
-                    subgroup1_max = st.number_input("Max Skill Level:", min_value=1, max_value=10, value=5, key="sg1_max")
+                    subgroup1_min = st.number_input("Min Skill Level:", min_value=1, max_value=15, value=1, key="sg1_min")
+                    subgroup1_max = st.number_input("Max Skill Level:", min_value=1, max_value=15, value=8, key="sg1_max")
                     
                 with col2:
                     subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
                     st.markdown(f"**{subgroup2_name}**")
-                    subgroup2_min = st.number_input("Min Skill Level:", min_value=1, max_value=10, value=6, key="sg2_min")
-                    subgroup2_max = st.number_input("Max Skill Level:", min_value=1, max_value=10, value=10, key="sg2_max")
+                    subgroup2_min = st.number_input("Min Skill Level:", min_value=1, max_value=15, value=9, key="sg2_min")
+                    subgroup2_max = st.number_input("Max Skill Level:", min_value=1, max_value=15, value=15, key="sg2_max")
                 
                 # Player count configuration
                 st.markdown("#### 📊 Player Count Configuration")
@@ -2714,13 +2848,13 @@ if menu == "Player Import & Auto-Balance":
                                         st.markdown(f"***🔼 {subgroup2_name} ({len(subgroups['subgroup2']['players'])} players)***")
                                         for idx, player in enumerate(subgroups['subgroup2']['players'], 1):
                                             gender_icon = "👨" if player['gender'] == 'M' else "👩"
-                                            skill_stars = "⭐" * min(player['skill_level'], 10)
+                                            skill_stars = "⭐" * min(player['skill_level'], 15)
                                             st.write(f"  {idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
                                 else:
                                     # Regular display without subgroups
                                     for idx, (_, player) in enumerate(players_df.iterrows(), 1):
                                         gender_icon = "👨" if player['gender'] == 'M' else "👩"
-                                        skill_stars = "⭐" * min(player['skill_level'], 10)
+                                        skill_stars = "⭐" * min(player['skill_level'], 15)
                                         st.write(f"{idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
                             else:
                                 st.warning(f"No balance data found for {display_name}")
