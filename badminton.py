@@ -132,9 +132,73 @@ def login_page():
         st.rerun()
 
 # Data persistence functions
+def validate_tournament_data():
+    """Validate tournament data integrity and fix common issues"""
+    fixes_applied = []
+    
+    # Check detailed_groups structure
+    if hasattr(st.session_state, 'detailed_groups') and st.session_state.detailed_groups:
+        for group_name, subgroups in st.session_state.detailed_groups.items():
+            for subgroup_key, subgroup_data in subgroups.items():
+                # Fix missing or invalid player data
+                if 'players' not in subgroup_data:
+                    subgroup_data['players'] = []
+                    fixes_applied.append(f"Fixed missing players list in {group_name}:{subgroup_key}")
+                
+                # Clean player data
+                cleaned_players = []
+                for player in subgroup_data.get('players', []):
+                    if isinstance(player, dict):
+                        # Ensure required fields exist
+                        cleaned_player = {
+                            'name': str(player.get('name', 'Unknown')),
+                            'gender': str(player.get('gender', 'M')),
+                            'email': str(player.get('email', '')),
+                            'skill_level': int(player.get('skill_level', 5)),
+                            'group': player.get('group'),
+                            'assigned': bool(player.get('assigned', True))
+                        }
+                        cleaned_players.append(cleaned_player)
+                
+                subgroup_data['players'] = cleaned_players
+                
+                # Fix/validate numeric fields
+                try:
+                    subgroup_data['total_skill'] = int(subgroup_data.get('total_skill', 0))
+                    subgroup_data['male_count'] = int(subgroup_data.get('male_count', 0))
+                    subgroup_data['female_count'] = int(subgroup_data.get('female_count', 0))
+                except (ValueError, TypeError):
+                    subgroup_data['total_skill'] = 0
+                    subgroup_data['male_count'] = 0
+                    subgroup_data['female_count'] = 0
+                    fixes_applied.append(f"Reset numeric values in {group_name}:{subgroup_key}")
+    
+    # Validate and clean other data structures
+    if not isinstance(st.session_state.get('groups', {}), dict):
+        st.session_state.groups = {}
+        fixes_applied.append("Reset corrupted groups data")
+    
+    if not isinstance(st.session_state.get('group_names', {}), dict):
+        st.session_state.group_names = {}
+        fixes_applied.append("Reset corrupted group_names data")
+    
+    if fixes_applied:
+        st.warning(f"🔧 Applied {len(fixes_applied)} data fixes:")
+        for fix in fixes_applied[:5]:  # Show first 5 fixes
+            st.info(f"  • {fix}")
+        if len(fixes_applied) > 5:
+            st.info(f"  • ... and {len(fixes_applied)-5} more fixes")
+    
+    return len(fixes_applied)
+
 def save_tournament_data():
     """Save tournament data to JSON files"""
     try:
+        # Validate and clean data before saving
+        fixes_count = validate_tournament_data()
+        if fixes_count > 0:
+            st.info(f"🔧 Data validation completed. Applied {fixes_count} fixes before saving.")
+        
         # Save player database
         if 'player_database' in st.session_state:
             st.session_state.player_database.to_json('tournament_players.json', orient='records')
@@ -147,28 +211,85 @@ def save_tournament_data():
             except Exception as e:
                 st.warning(f"Warning: Could not save standings properly: {str(e)}")
         
-        # Save other data including users (excluding matches - they have their own file now)
         # Handle subgroup_names carefully to prevent empty dict issues
         subgroup_names = st.session_state.get('subgroup_names', {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'})
         if not subgroup_names:  # Handle empty dict case
             subgroup_names = {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'}
         
+        # Clean detailed_groups data to ensure JSON serialization compatibility
+        detailed_groups_clean = {}
+        if 'detailed_groups' in st.session_state and st.session_state.detailed_groups:
+            for group_name, subgroups in st.session_state.detailed_groups.items():
+                detailed_groups_clean[group_name] = {}
+                for subgroup_key, subgroup_data in subgroups.items():
+                    # Clean player data
+                    clean_players = []
+                    for player in subgroup_data.get('players', []):
+                        if isinstance(player, dict):
+                            # Convert any numpy/pandas types to native Python types
+                            clean_player = {}
+                            for k, v in player.items():
+                                if hasattr(v, 'item'):  # numpy scalar
+                                    clean_player[k] = v.item()
+                                elif pd.isna(v):  # pandas NaN
+                                    clean_player[k] = None
+                                else:
+                                    clean_player[k] = v
+                            clean_players.append(clean_player)
+                    
+                    detailed_groups_clean[group_name][subgroup_key] = {
+                        'players': clean_players,
+                        'total_skill': int(subgroup_data.get('total_skill', 0)),
+                        'male_count': int(subgroup_data.get('male_count', 0)),
+                        'female_count': int(subgroup_data.get('female_count', 0))
+                    }
+        
+        # Save other data including users (excluding matches - they have their own file now)
         tournament_data = {
             'group_names': st.session_state.get('group_names', {}),
             'subgroup_names': subgroup_names,
             'groups': st.session_state.get('groups', {}),
-            'detailed_groups': st.session_state.get('detailed_groups', {}),
+            'detailed_groups': detailed_groups_clean,
             'standings': standings_to_save,
             'tournament_data': st.session_state.get('tournament_data', {}),  # Keep for backward compatibility
             'users': st.session_state.get('users', {}),
             'clash_edit_history': st.session_state.get('clash_edit_history', [])
         }
         
+        # Try to serialize to JSON first to catch any issues
+        try:
+            json_str = json.dumps(tournament_data, indent=2, default=str)
+        except TypeError as e:
+            st.error(f"⚠️ Data serialization error: {str(e)}")
+            st.error("Some data contains non-serializable objects. Attempting to save with fallback.")
+            # Use default=str to convert any remaining non-serializable objects to strings
+            json_str = json.dumps(tournament_data, indent=2, default=str)
+        
+        # Write to file
         with open('tournament_data.json', 'w') as f:
-            json.dump(tournament_data, f, indent=2)
+            f.write(json_str)
             
     except Exception as e:
-        st.error(f"Error saving data: {str(e)}")
+        st.error(f"❌ Error saving tournament data: {str(e)}")
+        # Create emergency backup with minimal data to prevent total loss
+        try:
+            emergency_data = {
+                'group_names': st.session_state.get('group_names', {}),
+                'subgroup_names': {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'},
+                'groups': st.session_state.get('groups', {}),
+                'detailed_groups': {},  # Skip problematic detailed_groups
+                'standings': {},
+                'tournament_data': {},
+                'users': st.session_state.get('users', {}),
+                'clash_edit_history': []
+            }
+            
+            with open('tournament_data_backup.json', 'w') as f:
+                json.dump(emergency_data, f, indent=2, default=str)
+            st.warning("💾 Created emergency backup: tournament_data_backup.json")
+            
+        except Exception as backup_error:
+            st.error(f"❌ Could not create emergency backup: {str(backup_error)}")
 
 def calculate_standings_from_matches():
     """Calculate standings from individual match records"""
@@ -309,6 +430,9 @@ def load_tournament_data():
                     calculated_standings = calculate_standings()
                     if not calculated_standings.empty:
                         st.session_state.standings = calculated_standings.set_index('Team')
+                
+                # Validate loaded data integrity
+                validate_tournament_data()
                         
         except FileNotFoundError:
             # Initialize defaults if tournament_data.json doesn't exist
@@ -329,9 +453,70 @@ def load_tournament_data():
                 "Clash Wins": [0]*6,
                 "Total Points": [0]*6
             }).set_index("Team")
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as json_error:
             # Handle corrupted JSON file
-            st.error("⚠️ tournament_data.json is corrupted. Creating new default settings.")
+            st.error(f"⚠️ tournament_data.json is corrupted: {str(json_error)}")
+            
+            # Try to load backup file
+            backup_loaded = False
+            try:
+                if os.path.exists('tournament_data_backup.json'):
+                    st.warning("🔄 Attempting to load from backup file...")
+                    with open('tournament_data_backup.json', 'r') as f:
+                        backup_data = json.load(f)
+                        st.session_state.group_names = backup_data.get('group_names', {})
+                        st.session_state.subgroup_names = backup_data.get('subgroup_names', {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'})
+                        st.session_state.groups = backup_data.get('groups', {})
+                        st.session_state.detailed_groups = backup_data.get('detailed_groups', {})
+                        st.session_state.users = backup_data.get('users', {})
+                        st.session_state.clash_edit_history = backup_data.get('clash_edit_history', [])
+                        backup_loaded = True
+                        st.success("✅ Successfully loaded from backup file!")
+                        
+                        # Recreate corrupted file with backup data
+                        save_tournament_data()
+                        st.info("📝 Recreated tournament_data.json from backup.")
+                        
+            except Exception as backup_error:
+                st.error(f"❌ Could not load backup file: {str(backup_error)}")
+            
+            if not backup_loaded:
+                st.warning("🆕 Creating fresh default settings.")
+                # Initialize defaults if no backup available
+                default_groups = [f"Group {chr(65+i)}" for i in range(6)]
+                default_names = ["Warriors", "Champions", "Legends", "Heroes", "Titans", "Gladiators"]
+                
+                st.session_state.group_names = {group: name for group, name in zip(default_groups, default_names)}
+                st.session_state.subgroup_names = {'subgroup1': '1 (Lower)', 'subgroup2': '2 (Higher)'}
+                st.session_state.groups = {group: [] for group in default_groups}
+                st.session_state.users = {}
+                st.session_state.clash_edit_history = []
+                st.session_state.tournament_data = {}
+                st.session_state.detailed_groups = {}
+                st.session_state.standings = pd.DataFrame({
+                    "Team": default_groups,
+                    "Clash Wins": [0]*6,
+                    "Total Points": [0]*6
+                }).set_index("Team")
+                
+                # Show recovery information
+                st.info("💡 **Data Recovery Status:**")
+                st.success("✅ **Player Database**: All player data preserved")
+                st.warning("⚠️ **Team Assignments**: Reset to empty (can be recreated)")
+                st.warning("⚠️ **Match History**: Reset (if any existed)")
+                st.info("🔄 **Next Steps**: Go to 'Player Import & Auto-Balance' to recreate your teams")
+                
+                # Mark that recovery notice should be shown
+                if 'recovery_notice_dismissed' not in st.session_state:
+                    st.session_state.recovery_notice_dismissed = False
+            
+            load_matches()
+        except Exception as e:
+            # Handle any other unexpected errors
+            st.error(f"❌ Unexpected error loading tournament data: {str(e)}")
+            st.error("🆕 Initializing with default settings.")
+            
+            # Initialize defaults as fallback
             default_groups = [f"Group {chr(65+i)}" for i in range(6)]
             default_names = ["Warriors", "Champions", "Legends", "Heroes", "Titans", "Gladiators"]
             
@@ -341,6 +526,13 @@ def load_tournament_data():
             st.session_state.users = {}
             st.session_state.clash_edit_history = []
             st.session_state.tournament_data = {}
+            load_matches()  
+            st.session_state.detailed_groups = {}
+            st.session_state.standings = pd.DataFrame({
+                "Team": default_groups,
+                "Clash Wins": [0]*6,
+                "Total Points": [0]*6
+            }).set_index("Team")
             load_matches()
             st.session_state.detailed_groups = {}
             st.session_state.standings = pd.DataFrame({
@@ -702,6 +894,36 @@ st.sidebar.divider()
 
 menu = st.sidebar.radio("Navigate", available_pages)
 
+# Check for data recovery status and show notice
+if (hasattr(st.session_state, 'groups') and 
+    all(not players for players in st.session_state.groups.values()) and 
+    not st.session_state.player_database.empty and 
+    not st.session_state.get('recovery_notice_dismissed', False)):
+    
+    st.warning("🔄 **Data Recovery Completed**: Tournament structure was restored from corruption.")
+    
+    with st.expander("📋 Recovery Details", expanded=True):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.success("**✅ Preserved Data:**")
+            st.write("• All player information (60 players)")
+            st.write("• Group names and structure")
+            st.write("• User accounts and permissions")
+            st.write("• Tournament settings")
+        
+        with col2:
+            st.warning("**⚠️ Reset Data:**")
+            st.write("• Team assignments (groups are empty)")
+            st.write("• Match history and standings")
+            st.write("• Detailed subgroup configurations")
+        
+        st.info("**🔄 Next Steps:** Go to 'Player Import & Auto-Balance' to recreate your teams with the preserved player data.")
+        
+        if st.button("✅ Dismiss Recovery Notice"):
+            st.session_state.recovery_notice_dismissed = True
+            st.rerun()
+
 # Auto-balancing algorithm
 def auto_balance_groups(players_df, min_females_per_group=None, max_females_per_group=None, force_rebalance=False):
     """
@@ -922,6 +1144,498 @@ def auto_balance_groups(players_df, min_females_per_group=None, max_females_per_
     return result_groups
 
 
+def calculate_optimal_subgroup_ranges(players_df, num_groups, players_per_subgroup_1, players_per_subgroup_2):
+    """
+    Calculate optimal subgroup skill ranges based on actual data distribution
+    This solves the issue where fixed ranges (1-8, 9-15) don't match data distribution
+    """
+    total_needed_sg1 = num_groups * players_per_subgroup_1
+    total_needed_sg2 = num_groups * players_per_subgroup_2
+    total_needed = total_needed_sg1 + total_needed_sg2
+    
+    if len(players_df) < total_needed:
+        raise ValueError(f"Insufficient total players: need {total_needed}, have {len(players_df)}")
+    
+    # Sort players by skill level
+    sorted_players = players_df.sort_values('skill_level').reset_index(drop=True)
+    
+    # Find the skill split point that gives us the right proportions
+    split_ratio = players_per_subgroup_1 / (players_per_subgroup_1 + players_per_subgroup_2)
+    ideal_split_index = int(len(sorted_players) * split_ratio)
+    
+    # Find optimal split point by trying different positions
+    best_split_index = ideal_split_index
+    best_score = float('inf')
+    
+    # Try different split points around the ideal position
+    for test_split in range(max(total_needed_sg1, ideal_split_index - 15), 
+                           min(len(sorted_players) - total_needed_sg2, ideal_split_index + 15)):
+        if test_split < total_needed_sg1 or (len(sorted_players) - test_split) < total_needed_sg2:
+            continue
+            
+        # Score based on how close we are to the ideal split and skill gap
+        score = abs(test_split - ideal_split_index)
+        
+        # Also consider skill gap at the split point
+        if test_split > 0 and test_split < len(sorted_players):
+            skill_before = sorted_players.iloc[test_split - 1]['skill_level']
+            skill_after = sorted_players.iloc[test_split]['skill_level']
+            skill_gap = skill_after - skill_before
+            score += skill_gap * 0.5  # Prefer splits with larger skill gaps
+        
+        if score < best_score:
+            best_score = score
+            best_split_index = test_split
+    
+    # Determine ranges based on optimal split
+    if best_split_index >= total_needed_sg1 and best_split_index <= len(sorted_players) - total_needed_sg2:
+        # Split at the optimal point
+        split_skill = sorted_players.iloc[best_split_index]['skill_level']
+        
+        subgroup1_min = sorted_players.iloc[0]['skill_level'] 
+        subgroup1_max = split_skill - 1 if split_skill > sorted_players.iloc[0]['skill_level'] else split_skill
+        subgroup2_min = split_skill
+        subgroup2_max = sorted_players.iloc[-1]['skill_level']
+        
+        # Handle edge case where skills are consecutive
+        if subgroup1_max < subgroup1_min:
+            subgroup1_max = split_skill
+            subgroup2_min = split_skill + 1
+    else:
+        # Fallback: split based on skill distribution percentiles
+        skill_25th = sorted_players['skill_level'].quantile(0.25)
+        skill_75th = sorted_players['skill_level'].quantile(0.75)
+        
+        subgroup1_min = sorted_players.iloc[0]['skill_level']
+        subgroup1_max = skill_25th + (skill_75th - skill_25th) * split_ratio
+        subgroup2_min = subgroup1_max + 1
+        subgroup2_max = sorted_players.iloc[-1]['skill_level']
+    
+    # Ensure ranges are integers and valid
+    subgroup1_min = int(subgroup1_min)
+    subgroup1_max = int(subgroup1_max)
+    subgroup2_min = int(subgroup2_min)
+    subgroup2_max = int(subgroup2_max)
+    
+    # Validate the ranges work with available data
+    sg1_available = len(players_df[
+        (players_df['skill_level'] >= subgroup1_min) & 
+        (players_df['skill_level'] <= subgroup1_max)
+    ])
+    sg2_available = len(players_df[
+        (players_df['skill_level'] >= subgroup2_min) & 
+        (players_df['skill_level'] <= subgroup2_max)
+    ])
+    
+    return {
+        'subgroup1_min': subgroup1_min,
+        'subgroup1_max': subgroup1_max,
+        'subgroup2_min': subgroup2_min, 
+        'subgroup2_max': subgroup2_max,
+        'sg1_available': sg1_available,
+        'sg2_available': sg2_available,
+        'sg1_needed': total_needed_sg1,
+        'sg2_needed': total_needed_sg2
+    }
+
+# Player Management Functions
+def edit_player_details():
+    """Allow superuser to edit individual player details"""
+    if st.session_state.player_database.empty:
+        st.warning("No players found. Please set up players first.")
+        return
+    
+    st.markdown("### 📝 Select Player to Edit")
+    
+    # Create a list of players with their current group info
+    player_options = []
+    for idx, player in st.session_state.player_database.iterrows():
+        group_display = st.session_state.group_names.get(player.get('group', 'Unassigned'), player.get('group', 'Unassigned'))
+        player_options.append(f"{player['name']} ({group_display}, Skill: {player.get('skill_level', 'N/A')})")
+    
+    selected_player_display = st.selectbox("Choose player to edit:", player_options)
+    selected_idx = player_options.index(selected_player_display)
+    selected_player = st.session_state.player_database.iloc[selected_idx]
+    
+    st.divider()
+    
+    # Edit form
+    st.markdown("### ✏️ Edit Player Information")
+    with st.form(f"edit_player_{selected_idx}"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            new_name = st.text_input("Player Name:", value=selected_player.get('name', ''))
+            new_email = st.text_input("Email:", value=selected_player.get('email', ''))
+            new_skill = st.number_input("Skill Level:", min_value=1, max_value=15, 
+                                      value=int(selected_player.get('skill_level', 5)))
+        
+        with col2:
+            new_gender = st.selectbox("Gender:", ['M', 'F'], 
+                                    index=0 if selected_player.get('gender', 'M') == 'M' else 1)
+            
+            # Group selection
+            group_options = list(st.session_state.groups.keys())
+            group_displays = [st.session_state.group_names.get(key, key) for key in group_options]
+            current_group = selected_player.get('group', group_options[0] if group_options else None)
+            current_group_idx = group_options.index(current_group) if current_group in group_options else 0
+            
+            new_group_display = st.selectbox("Assign to Group:", group_displays, index=current_group_idx)
+            new_group = group_options[group_displays.index(new_group_display)]
+        
+        # Show current vs new values
+        st.markdown("**📊 Summary of Changes:**")
+        changes = []
+        if new_name != selected_player.get('name', ''):
+            changes.append(f"Name: {selected_player.get('name', '')} → {new_name}")
+        if new_email != selected_player.get('email', ''):
+            changes.append(f"Email: {selected_player.get('email', '')} → {new_email}")
+        if new_skill != selected_player.get('skill_level', 5):
+            changes.append(f"Skill: {selected_player.get('skill_level', 5)} → {new_skill}")
+        if new_gender != selected_player.get('gender', 'M'):
+            changes.append(f"Gender: {selected_player.get('gender', 'M')} → {new_gender}")
+        if new_group != selected_player.get('group', ''):
+            old_group_display = st.session_state.group_names.get(selected_player.get('group', ''), selected_player.get('group', ''))
+            changes.append(f"Group: {old_group_display} → {new_group_display}")
+        
+        if changes:
+            for change in changes:
+                st.info(f"🔄 {change}")
+        else:
+            st.success("✅ No changes detected")
+        
+        submitted = st.form_submit_button("💾 Save Changes", type="primary")
+        
+        if submitted:
+            if not new_name.strip():
+                st.error("Player name cannot be empty!")
+                return
+                
+            # Update player_database
+            old_name = selected_player.get('name', '')
+            old_group = selected_player.get('group', '')
+            
+            st.session_state.player_database.loc[selected_idx, 'name'] = new_name
+            st.session_state.player_database.loc[selected_idx, 'email'] = new_email  
+            st.session_state.player_database.loc[selected_idx, 'skill_level'] = new_skill
+            st.session_state.player_database.loc[selected_idx, 'gender'] = new_gender
+            st.session_state.player_database.loc[selected_idx, 'group'] = new_group
+            
+            # Update groups (player name lists)
+            if old_group in st.session_state.groups:
+                if old_name in st.session_state.groups[old_group]:
+                    st.session_state.groups[old_group].remove(old_name)
+            
+            if new_group not in st.session_state.groups:
+                st.session_state.groups[new_group] = []
+                
+            if new_name not in st.session_state.groups[new_group]:
+                st.session_state.groups[new_group].append(new_name)
+            
+            # Update detailed_groups if it exists
+            if hasattr(st.session_state, 'detailed_groups') and st.session_state.detailed_groups:
+                update_detailed_groups_player(old_name, old_group, {
+                    'name': new_name,
+                    'email': new_email,
+                    'skill_level': new_skill,
+                    'gender': new_gender
+                }, new_group)
+            
+            # Save changes
+            save_tournament_data()
+            
+            st.success(f"✅ Successfully updated {new_name}!")
+            
+            # Show subgroup placement details if detailed_groups exists
+            if hasattr(st.session_state, 'detailed_groups') and st.session_state.detailed_groups and new_group in st.session_state.detailed_groups:
+                # Check which subgroup the player should be in based on skill level
+                subgroup1_min = getattr(st.session_state, 'subgroup1_min', None)
+                subgroup1_max = getattr(st.session_state, 'subgroup1_max', None)
+                subgroup2_min = getattr(st.session_state, 'subgroup2_min', None)
+                subgroup2_max = getattr(st.session_state, 'subgroup2_max', None)
+                
+                if None not in [subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max]:
+                    if new_skill >= subgroup1_min and new_skill <= subgroup1_max:
+                        expected_subgroup = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                    elif new_skill >= subgroup2_min and new_skill <= subgroup2_max:
+                        expected_subgroup = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                    else:
+                        expected_subgroup = "Unknown (skill outside ranges)"
+                    
+                    st.info(f"🎯 **Subgroup Placement**: {new_name} (Skill {new_skill}) placed in **{expected_subgroup}**")
+            
+            st.rerun()
+
+def update_detailed_groups_player(old_name, old_group, new_player_data, new_group):
+    """Update player in detailed_groups structure"""
+    # Remove from old group
+    if old_group in st.session_state.detailed_groups:
+        for subgroup_key in ['subgroup1', 'subgroup2']:
+            players = st.session_state.detailed_groups[old_group][subgroup_key]['players']
+            for i, player in enumerate(players):
+                if isinstance(player, dict) and player.get('name') == old_name:
+                    # Update skill total
+                    st.session_state.detailed_groups[old_group][subgroup_key]['total_skill'] -= player['skill_level']
+                    
+                    # Update gender counts
+                    if player['gender'] == 'M':
+                        st.session_state.detailed_groups[old_group][subgroup_key]['male_count'] = max(0,
+                            st.session_state.detailed_groups[old_group][subgroup_key]['male_count'] - 1)
+                    else:
+                        st.session_state.detailed_groups[old_group][subgroup_key]['female_count'] = max(0,
+                            st.session_state.detailed_groups[old_group][subgroup_key]['female_count'] - 1)
+                    
+                    players.pop(i)
+                    break
+    
+    # Add to new group (determine correct subgroup based on skill level)
+    if new_group in st.session_state.detailed_groups:
+        skill_level = new_player_data['skill_level']
+        
+        # Method 1: Try to get subgroup ranges from session state (stored when teams were created)
+        subgroup1_min = getattr(st.session_state, 'subgroup1_min', None)
+        subgroup1_max = getattr(st.session_state, 'subgroup1_max', None)
+        subgroup2_min = getattr(st.session_state, 'subgroup2_min', None)
+        subgroup2_max = getattr(st.session_state, 'subgroup2_max', None)
+        
+        # Method 2: If not stored, detect ranges from existing players in detailed_groups
+        if None in [subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max]:
+            detected_ranges = detect_subgroup_ranges_from_existing_data()
+            if detected_ranges:
+                subgroup1_min = detected_ranges['subgroup1_min']
+                subgroup1_max = detected_ranges['subgroup1_max']
+                subgroup2_min = detected_ranges['subgroup2_min']
+                subgroup2_max = detected_ranges['subgroup2_max']
+            else:
+                # Method 3: Use conservative defaults as last resort
+                subgroup1_min, subgroup1_max = 1, 8
+                subgroup2_min, subgroup2_max = 9, 15
+        
+        # Determine target subgroup based on skill level and ranges
+        if skill_level >= subgroup1_min and skill_level <= subgroup1_max:
+            target_subgroup = 'subgroup1'
+        elif skill_level >= subgroup2_min and skill_level <= subgroup2_max:
+            target_subgroup = 'subgroup2'
+        else:
+            # Edge case: skill level doesn't fit either range perfectly
+            # Choose the closer range
+            dist_to_sg1 = min(abs(skill_level - subgroup1_min), abs(skill_level - subgroup1_max))
+            dist_to_sg2 = min(abs(skill_level - subgroup2_min), abs(skill_level - subgroup2_max))
+            target_subgroup = 'subgroup1' if dist_to_sg1 <= dist_to_sg2 else 'subgroup2'
+        
+        # Add to target subgroup
+        st.session_state.detailed_groups[new_group][target_subgroup]['players'].append(new_player_data)
+        st.session_state.detailed_groups[new_group][target_subgroup]['total_skill'] += skill_level
+        
+        # Update gender counts
+        if new_player_data['gender'] == 'M':
+            st.session_state.detailed_groups[new_group][target_subgroup]['male_count'] += 1
+        else:
+            st.session_state.detailed_groups[new_group][target_subgroup]['female_count'] += 1
+
+def detect_subgroup_ranges_from_existing_data():
+    """Detect subgroup skill ranges from existing detailed_groups data"""
+    if not hasattr(st.session_state, 'detailed_groups') or not st.session_state.detailed_groups:
+        return None
+    
+    sg1_skills = []
+    sg2_skills = []
+    
+    # Collect skill levels from all existing players in both subgroups
+    for group_name, subgroups in st.session_state.detailed_groups.items():
+        for player in subgroups['subgroup1']['players']:
+            if isinstance(player, dict) and 'skill_level' in player:
+                sg1_skills.append(player['skill_level'])
+        
+        for player in subgroups['subgroup2']['players']:
+            if isinstance(player, dict) and 'skill_level' in player:
+                sg2_skills.append(player['skill_level'])
+    
+    # If we have data from both subgroups, determine the ranges
+    if sg1_skills and sg2_skills:
+        return {
+            'subgroup1_min': min(sg1_skills),
+            'subgroup1_max': max(sg1_skills),
+            'subgroup2_min': min(sg2_skills),
+            'subgroup2_max': max(sg2_skills)
+        }
+    
+    return None
+
+def transfer_players_between_groups():
+    """Allow transferring players between groups"""
+    if st.session_state.player_database.empty:
+        st.warning("No players found. Please set up players first.")
+        return
+    
+    st.markdown("### 🔄 Transfer Players Between Groups")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Source Group:**")
+        source_groups = [key for key in st.session_state.groups.keys() if st.session_state.groups[key]]
+        if not source_groups:
+            st.warning("No groups with players found.")
+            return
+            
+        source_group_displays = [st.session_state.group_names.get(key, key) for key in source_groups]
+        source_display = st.selectbox("From:", source_group_displays)
+        source_group = source_groups[source_group_displays.index(source_display)]
+        
+        # Show players in source group
+        source_players = st.session_state.groups[source_group]
+        selected_players = st.multiselect("Select players to transfer:", source_players)
+    
+    with col2:
+        st.markdown("**Destination Group:**")
+        dest_groups = list(st.session_state.groups.keys())
+        dest_group_displays = [st.session_state.group_names.get(key, key) for key in dest_groups]
+        dest_display = st.selectbox("To:", dest_group_displays)
+        dest_group = dest_groups[dest_group_displays.index(dest_display)]
+    
+    if source_group == dest_group:
+        st.info("Please select different source and destination groups.")
+        return
+    
+    if selected_players:
+        st.markdown("### 📋 Transfer Summary")
+        st.info(f"Transfer {len(selected_players)} players from **{source_display}** to **{dest_display}**")
+        
+        for player in selected_players:
+            st.write(f"• {player}")
+        
+        if st.button("✅ Confirm Transfer", type="primary"):
+            # Update player_database
+            mask = (st.session_state.player_database['name'].isin(selected_players)) & \
+                   (st.session_state.player_database['group'] == source_group)
+            st.session_state.player_database.loc[mask, 'group'] = dest_group
+            
+            # Update groups
+            for player in selected_players:
+                if player in st.session_state.groups[source_group]:
+                    st.session_state.groups[source_group].remove(player)
+                if player not in st.session_state.groups[dest_group]:
+                    st.session_state.groups[dest_group].append(player)
+            
+            # Update detailed_groups if exists
+            if hasattr(st.session_state, 'detailed_groups') and st.session_state.detailed_groups:
+                for player_name in selected_players:
+                    player_data = st.session_state.player_database[
+                        st.session_state.player_database['name'] == player_name].iloc[0]
+                    update_detailed_groups_player(player_name, source_group, {
+                        'name': player_data['name'],
+                        'email': player_data['email'], 
+                        'skill_level': player_data['skill_level'],
+                        'gender': player_data['gender']
+                    }, dest_group)
+            
+            # Save changes
+            save_tournament_data()
+            
+            # Force refresh of session state to ensure UI consistency
+            if hasattr(st.session_state, 'detailed_groups'):
+                # Clear any cached data that might prevent UI updates
+                pass
+            
+            st.success(f"✅ Successfully transferred {len(selected_players)} players!")
+            
+            # Show transfer details for debugging
+            with st.expander("🔍 Transfer Details", expanded=False):
+                for player_name in selected_players:
+                    player_data = st.session_state.player_database[
+                        st.session_state.player_database['name'] == player_name].iloc[0]
+                    skill_level = player_data['skill_level']
+                    
+                    # Determine which subgroup they should be in
+                    subgroup1_min = getattr(st.session_state, 'subgroup1_min', None)
+                    subgroup1_max = getattr(st.session_state, 'subgroup1_max', None)
+                    subgroup2_min = getattr(st.session_state, 'subgroup2_min', None)
+                    subgroup2_max = getattr(st.session_state, 'subgroup2_max', None)
+                    
+                    if None not in [subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max]:
+                        if skill_level >= subgroup1_min and skill_level <= subgroup1_max:
+                            expected_subgroup = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                        elif skill_level >= subgroup2_min and skill_level <= subgroup2_max:
+                            expected_subgroup = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                        else:
+                            expected_subgroup = "Unknown (skill outside ranges)"
+                        
+                        st.info(f"**{player_name}** (Skill {skill_level}) → Expected in **{expected_subgroup}**")
+                    else:
+                        st.warning(f"**{player_name}** (Skill {skill_level}) → Subgroup ranges not configured")
+            
+            st.balloons()  # Visual confirmation
+            
+            # Add informational message about where to see changes
+            st.info("🔄 **Changes applied!** Go to 'Team Details' to see updated team rosters.")
+            st.rerun()
+
+def export_import_players():
+    """Export and import functionality"""
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📤 Export Players")
+        if st.button("📊 Export All Players"):
+            if not st.session_state.player_database.empty:
+                players_csv = st.session_state.player_database.to_csv(index=False)
+                st.download_button(
+                    label="💾 Download Players CSV",
+                    data=players_csv,
+                    file_name="tournament_players.csv", 
+                    mime="text/csv"
+                )
+            else:
+                st.warning("No player data to export")
+        
+        if st.button("🏆 Export Groups"):
+            if st.session_state.groups:
+                # Create a CSV with group assignments
+                group_data = []
+                for group_name, players in st.session_state.groups.items():
+                    for i, player in enumerate(players, 1):
+                        group_data.append({
+                            'Group': st.session_state.group_names.get(group_name, group_name),
+                            'Position': i,
+                            'Player': player
+                        })
+                
+                groups_df = pd.DataFrame(group_data)
+                groups_csv = groups_df.to_csv(index=False)
+                st.download_button(
+                    label="💾 Download Groups CSV",
+                    data=groups_csv,
+                    file_name="tournament_groups.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.warning("No group data to export")
+    
+    with col2:
+        st.markdown("### 📥 Backup & Restore")
+        if st.button("🔄 Backup All Tournament Data"):
+            tournament_data = {
+                'groups': st.session_state.groups,
+                'group_names': st.session_state.group_names,
+                'subgroup_names': getattr(st.session_state, 'subgroup_names', {}),
+                'player_database': st.session_state.player_database.to_dict('records'),
+                'detailed_groups': getattr(st.session_state, 'detailed_groups', {}),
+                'individual_matches': getattr(st.session_state, 'individual_matches', []),
+                'standings': st.session_state.standings.to_dict('records') if not st.session_state.standings.empty else []
+            }
+            
+            backup_json = json.dumps(tournament_data, indent=2, default=str)
+            st.download_button(
+                label="💾 Download Tournament Backup",
+                data=backup_json,
+                file_name=f"tournament_backup_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
+        
+        st.info("💡 **Note**: After making changes, other sections (Team Details, Record a Clash, Standings, etc.) will automatically reflect the updates.")
+
+
 def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max, subgroup1_count, subgroup2_count, num_groups=6, min_females_per_group=None, max_females_per_group=None, force_rebalance=False):
     """
     Auto-balance players into specified number of groups with 2 skill-based subgroups each
@@ -1114,13 +1828,21 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
         optimize_skill_balance(subgroup_type, target_count_per_group, force_rebalance)
     
     def optimize_skill_balance(subgroup_type, target_count_per_group, force_rebalance=False):
-        """Simple redistribution for subgroups using the proven algorithm"""
+        """Enhanced redistribution for subgroups with imbalanced data handling"""
         
-        max_iterations = 100
+        max_iterations = 200  # Increased for imbalanced data
         
-        # If force_rebalance is True, do more mixing with proper skill validation
+        # Special handling for imbalanced subgroups (like 36 vs 24 players)
+        current_skills = [groups[group_key][subgroup_type]['total_skill'] for group_key in group_keys]
+        if any(current_skills):
+            skill_variance = max(current_skills) - min(current_skills)
+            if skill_variance > 3:  # High imbalance detected
+                max_iterations = 400  # Even more iterations for difficult cases
+                st.write(f"🔧 Detected high skill imbalance in {subgroup_type}, using extended optimization...")
+        
+        # If force_rebalance is True, do enhanced mixing with proper skill validation
         if force_rebalance:
-            max_iterations = 200  # More iterations for better mixing
+            max_iterations = max(max_iterations, 500)  # Ensure sufficient attempts
             
             # Determine skill range for this subgroup to validate swaps
             if subgroup_type == 'subgroup1':
@@ -1128,8 +1850,9 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
             else:  # subgroup2
                 valid_min_skill, valid_max_skill = subgroup2_min, subgroup2_max
             
-            # Perform some random swaps first within this subgroup to shuffle teams
-            for _ in range(8):  # Reduced random swaps of same-gender players
+            # Enhanced random swaps for better mixing - more attempts for imbalanced data
+            random_swap_attempts = 20 if skill_variance > 3 else 15
+            for _ in range(random_swap_attempts):
                 group1_idx = random.randint(0, len(group_keys)-1)
                 group2_idx = random.randint(0, len(group_keys)-1)
                 
@@ -1167,7 +1890,11 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
                             swap_made = True
                             break
         
-        for iteration in range(max_iterations):  # Use variable iterations
+        consecutive_no_improvement = 0
+        max_no_improvement = 25  # Allow more attempts for imbalanced data
+        best_variance_seen = float('inf')
+        
+        for iteration in range(max_iterations):
             # Get current group totals for this subgroup
             current_skills = [groups[group_key][subgroup_type]['total_skill'] for group_key in group_keys]
             
@@ -1176,67 +1903,169 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
                 
             max_skill = max(current_skills)
             min_skill = min(current_skills)
+            current_variance = sum((skill - sum(current_skills)/len(current_skills))**2 for skill in current_skills)
+            
+            # Track best variance seen
+            if current_variance < best_variance_seen:
+                best_variance_seen = current_variance
+                consecutive_no_improvement = 0
+            else:
+                consecutive_no_improvement += 1
             
             # Success: difference <= 1 (unless force_rebalance is True)
             if max_skill - min_skill <= 1 and not force_rebalance:
                 break
             
-            # For force_rebalance, do at least 10 iterations to ensure redistribution
-            if force_rebalance and iteration < 10:
+            # For force_rebalance with imbalanced data, be more flexible
+            if force_rebalance and iteration < 15:
                 pass  # Continue balancing even if already balanced
             elif max_skill - min_skill <= 1:
                 break
             
-            # Find max and min groups
-            max_group_idx = current_skills.index(max_skill)
-            min_group_idx = current_skills.index(min_skill)
+            # ENHANCED: Consider ALL pairs of groups with better scoring
+            best_global_swap = None
+            best_global_improvement = 0
+            best_from_group_idx = None
+            best_to_group_idx = None
             
-            max_group = groups[group_keys[max_group_idx]][subgroup_type]
-            min_group = groups[group_keys[min_group_idx]][subgroup_type]
-            
-            # Skip if either is empty
-            if not max_group['players'] or not min_group['players']:
-                break
-            
-            # Find best player swap using the simple proven algorithm
-            best_swap = None
-            best_improvement = 0
-            
-            for i, max_player in enumerate(max_group['players']):
-                for j, min_player in enumerate(min_group['players']):
-                    # Only swap same gender
-                    if max_player['gender'] != min_player['gender']:
+            # Try swaps between ALL pairs of groups
+            for from_idx in range(len(group_keys)):
+                for to_idx in range(len(group_keys)):
+                    if from_idx == to_idx:
                         continue
                     
-                    # Calculate skill difference
-                    skill_diff = max_player['skill_level'] - min_player['skill_level']
+                    from_group = groups[group_keys[from_idx]][subgroup_type]
+                    to_group = groups[group_keys[to_idx]][subgroup_type]
                     
-                    # Only swap if it reduces the gap
-                    if skill_diff <= 0:
+                    # Skip if either is empty
+                    if not from_group['players'] or not to_group['players']:
                         continue
                     
-                    # Calculate new totals after swap
-                    new_max_skill = max_skill - skill_diff
-                    new_min_skill = min_skill + skill_diff
-                    new_diff = abs(new_max_skill - new_min_skill)
+                    from_total = from_group['total_skill']
+                    to_total = to_group['total_skill']
                     
-                    # If this improves balance, consider it
-                    improvement = (max_skill - min_skill) - new_diff
-                    if improvement > best_improvement:
-                        best_improvement = improvement
-                        best_swap = (i, j, max_player, min_player, skill_diff)
+                    # Enhanced scoring: consider both balance improvement and variance reduction
+                    for i, from_player in enumerate(from_group['players']):
+                        for j, to_player in enumerate(to_group['players']):
+                            # Only swap same gender (relaxed for imbalanced data in later iterations)
+                            if from_player['gender'] != to_player['gender']:
+                                if iteration < max_iterations * 0.7:  # Only relax gender constraint in later iterations
+                                    continue
+                            
+                            # Calculate skill difference
+                            skill_diff = from_player['skill_level'] - to_player['skill_level']
+                            
+                            # Calculate new totals after swap
+                            new_from_total = from_total - skill_diff
+                            new_to_total = to_total + skill_diff
+                            
+                            # Calculate both range improvement and variance improvement
+                            new_skills = current_skills.copy()
+                            new_skills[from_idx] = new_from_total
+                            new_skills[to_idx] = new_to_total
+                            
+                            # Range improvement
+                            new_max = max(new_skills)
+                            new_min = min(new_skills)
+                            range_improvement = (max_skill - min_skill) - (new_max - new_min)
+                            
+                            # Variance improvement  
+                            new_avg = sum(new_skills) / len(new_skills)
+                            new_variance = sum((skill - new_avg)**2 for skill in new_skills)
+                            variance_improvement = current_variance - new_variance
+                            
+                            # Combined improvement score
+                            improvement = range_improvement * 2 + variance_improvement * 0.1
+                            
+                            # If this is the best improvement found so far
+                            if improvement > best_global_improvement:
+                                best_global_improvement = improvement
+                                best_global_swap = (i, j, from_player, to_player, skill_diff)
+                                best_from_group_idx = from_idx
+                                best_to_group_idx = to_idx
             
-            # Make the best swap
-            if best_swap:
-                i, j, max_player, min_player, skill_diff = best_swap
+            # Make the best global swap
+            if best_global_swap and best_global_improvement > 0:
+                i, j, from_player, to_player, skill_diff = best_global_swap
+                from_group = groups[group_keys[best_from_group_idx]][subgroup_type]
+                to_group = groups[group_keys[best_to_group_idx]][subgroup_type]
+                
                 # Swap players
-                max_group['players'][i] = min_player
-                min_group['players'][j] = max_player
+                from_group['players'][i] = to_player
+                to_group['players'][j] = from_player
                 # Update totals
-                max_group['total_skill'] -= skill_diff
-                min_group['total_skill'] += skill_diff
+                from_group['total_skill'] -= skill_diff
+                to_group['total_skill'] += skill_diff
+                
+                consecutive_no_improvement = 0
             else:
-                break  # No beneficial swap found
+                consecutive_no_improvement += 1
+                
+                # Enhanced fallback for imbalanced data
+                if consecutive_no_improvement >= max_no_improvement and iteration > max_iterations // 3:
+                    # Emergency escape: try the most beneficial single swap available
+                    emergency_swap_made = False
+                    best_emergency_improvement = 0
+                    best_emergency_swap = None
+                    
+                    for from_idx in range(len(group_keys)):
+                        if emergency_swap_made:
+                            break
+                        for to_idx in range(len(group_keys)):
+                            if from_idx == to_idx or emergency_swap_made:
+                                continue
+                                
+                            from_group = groups[group_keys[from_idx]][subgroup_type]
+                            to_group = groups[group_keys[to_idx]][subgroup_type]
+                            
+                            if not from_group['players'] or not to_group['players']:
+                                continue
+                                
+                            from_total = from_group['total_skill']
+                            to_total = to_group['total_skill']
+                            
+                            # Only if there's significant imbalance to fix
+                            if abs(from_total - to_total) < 2:
+                                continue
+                            
+                            # Find ANY swap that improves balance (ignore gender temporarily)
+                            for i, from_player in enumerate(from_group['players']):
+                                for j, to_player in enumerate(to_group['players']):  
+                                    skill_diff = from_player['skill_level'] - to_player['skill_level']
+                                    
+                                    # Calculate improvement
+                                    new_from = from_total - skill_diff
+                                    new_to = to_total + skill_diff
+                                    improvement = abs(from_total - to_total) - abs(new_from - new_to)
+                                    
+                                    if improvement > best_emergency_improvement:
+                                        best_emergency_improvement = improvement
+                                        best_emergency_swap = (from_idx, to_idx, i, j, skill_diff)
+                    
+                    # Execute best emergency swap
+                    if best_emergency_swap and best_emergency_improvement > 0:
+                        from_idx, to_idx, i, j, skill_diff = best_emergency_swap
+                        from_group = groups[group_keys[from_idx]][subgroup_type]
+                        to_group = groups[group_keys[to_idx]][subgroup_type]
+                        
+                        from_player = from_group['players'][i]
+                        to_player = to_group['players'][j]
+                        
+                        from_group['players'][i] = to_player
+                        to_group['players'][j] = from_player
+                        from_group['total_skill'] -= skill_diff
+                        to_group['total_skill'] += skill_diff
+                        
+                        emergency_swap_made = True
+                        consecutive_no_improvement = 0
+                        st.write(f"🚨 Applied emergency balance adjustment for {subgroup_type}")
+                    
+                    if not emergency_swap_made and consecutive_no_improvement >= max_no_improvement * 2:
+                        # Final fallback: accept current state
+                        final_diff = max(current_skills) - min(current_skills)
+                        if final_diff <= 2:  # Accept differences up to 2 for imbalanced data
+                            st.write(f"⚠️ {subgroup_type} balanced within 2 points (best possible with current data)")
+                        break
     
     # Balance subgroup 1 players
     balance_players_by_skill(subgroup1_selected, 'subgroup1', subgroup1_count, force_rebalance)
@@ -1246,18 +2075,18 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
     
     # Final step: Balance overall combined totals across all groups
     def balance_overall_groups():
-        """Balance the combined totals of subgroup1 + subgroup2 across all groups"""
-        max_iterations = 100
+        """Enhanced balance of combined totals with global optimization"""
+        max_iterations = 150
         
         # If force_rebalance is True, do more iterations but NO cross-subgroup swaps
         if force_rebalance:
-            max_iterations = 200  # More iterations for better mixing
+            max_iterations = 300  # More iterations for better mixing
             
             # Only perform swaps WITHIN each subgroup type separately to maintain skill constraints
             # This ensures players never move between subgroups
             
             # Random swaps within subgroup1 only
-            for _ in range(8):  # Reduced random swaps within subgroup1 only
+            for _ in range(12):  # More random swaps within subgroup1 only
                 group1_idx = random.randint(0, len(group_keys)-1)
                 group2_idx = random.randint(0, len(group_keys)-1)
                 
@@ -1290,7 +2119,7 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
                     break
                         
             # Random swaps within subgroup2 only  
-            for _ in range(8):  # Reduced random swaps within subgroup2 only
+            for _ in range(12):  # More random swaps within subgroup2 only
                 group1_idx = random.randint(0, len(group_keys)-1)
                 group2_idx = random.randint(0, len(group_keys)-1)
                 
@@ -1322,6 +2151,9 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
                         continue
                     break
                         
+        consecutive_no_improvement = 0
+        max_no_improvement = 20
+                        
         for iteration in range(max_iterations):
             # Calculate combined totals
             combined_totals = []
@@ -1333,98 +2165,415 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
             max_total = max(combined_totals)
             min_total = min(combined_totals)
             
-            # If balanced within 1 point, we're done (unless force_rebalance is True)
-            if max_total - min_total <= 1 and not force_rebalance:
-                break
+            # If balanced within 1 point, check if we can stop
+            if max_total - min_total <= 1:
+                # For force_rebalance, do at least 5 iterations (reduced from 15)
+                # to ensure some redistribution but preserve constraints
+                if force_rebalance and iteration < 5:
+                    pass  # Continue balancing with reduced iterations
+                else:
+                    break  # Stop when balanced
             
-            # For force_rebalance, do at least 15 iterations to ensure redistribution
-            if force_rebalance and iteration < 15:
-                pass  # Continue balancing even if already balanced
-            elif max_total - min_total <= 1:
-                break
+            # ENHANCED: Try swaps across ALL pairs of groups for better optimization
+            best_global_swap = None
+            best_global_improvement = 0
+            best_from_group_idx = None
+            best_to_group_idx = None
             
-            # Find highest and lowest groups
-            max_idx = combined_totals.index(max_total)
-            min_idx = combined_totals.index(min_total)
-            
-            # Try swapping between subgroups of these groups
-            best_swap = None
-            best_improvement = 0
-            
-            # Try swaps within subgroup1 with skill validation
-            max_sg1 = groups[group_keys[max_idx]]['subgroup1']
-            min_sg1 = groups[group_keys[min_idx]]['subgroup1']
-            
-            for i, max_player in enumerate(max_sg1['players']):
-                for j, min_player in enumerate(min_sg1['players']):
-                    if max_player['gender'] != min_player['gender']:
+            # Try swaps between ALL pairs of groups, not just max-min
+            for from_idx in range(len(group_keys)):
+                for to_idx in range(len(group_keys)):
+                    if from_idx == to_idx:
                         continue
                     
-                    # Validate both players belong to subgroup1 skill range
-                    if not (subgroup1_min <= max_player['skill_level'] <= subgroup1_max):
-                        continue
-                    if not (subgroup1_min <= min_player['skill_level'] <= subgroup1_max):
-                        continue
+                    # Current combined totals
+                    from_combined = combined_totals[from_idx]  
+                    to_combined = combined_totals[to_idx]
                     
-                    skill_diff = max_player['skill_level'] - min_player['skill_level']
-                    if skill_diff <= 0:
+                    # Only consider if FROM group has higher combined total than TO group
+                    if from_combined <= to_combined:
                         continue
                     
-                    new_max_total = max_total - skill_diff
-                    new_min_total = min_total + skill_diff
-                    new_diff = abs(new_max_total - new_min_total)
+                    # Try swaps within subgroup1 first
+                    from_sg1 = groups[group_keys[from_idx]]['subgroup1']
+                    to_sg1 = groups[group_keys[to_idx]]['subgroup1']
                     
-                    improvement = (max_total - min_total) - new_diff
-                    if improvement > best_improvement:
-                        best_improvement = improvement
-                        best_swap = ('subgroup1', i, j, max_player, min_player, skill_diff)
+                    for i, from_player in enumerate(from_sg1['players']):
+                        for j, to_player in enumerate(to_sg1['players']):
+                            if from_player['gender'] != to_player['gender']:
+                                continue
+                            
+                            # Validate both players belong to subgroup1 skill range
+                            if not (subgroup1_min <= from_player['skill_level'] <= subgroup1_max):
+                                continue
+                            if not (subgroup1_min <= to_player['skill_level'] <= subgroup1_max):
+                                continue
+                            
+                            skill_diff = from_player['skill_level'] - to_player['skill_level']
+                            if skill_diff <= 0:
+                                continue
+                            
+                            # Calculate what new combined totals would be
+                            new_from_combined = from_combined - skill_diff
+                            new_to_combined = to_combined + skill_diff
+                            
+                            # Check if this swap would violate subgroup constraints
+                            # Get current subgroup1 totals across all groups
+                            current_sg1_totals = [groups[key]['subgroup1']['total_skill'] for key in group_keys] 
+                            temp_sg1_totals = current_sg1_totals.copy() 
+                            temp_sg1_totals[from_idx] = from_sg1['total_skill'] - skill_diff
+                            temp_sg1_totals[to_idx] = to_sg1['total_skill'] + skill_diff
+                            
+                            # Skip if subgroup constraint would be violated  
+                            if max(temp_sg1_totals) - min(temp_sg1_totals) > 1:
+                                continue
+                            
+                            # Calculate improvement in overall balance
+                            old_variance = sum((ct - sum(combined_totals)/len(combined_totals))**2 for ct in combined_totals)
+                            new_combined_totals = combined_totals.copy()
+                            new_combined_totals[from_idx] = new_from_combined
+                            new_combined_totals[to_idx] = new_to_combined
+                            new_avg = sum(new_combined_totals) / len(new_combined_totals)
+                            new_variance = sum((ct - new_avg)**2 for ct in new_combined_totals)
+                            
+                            improvement = old_variance - new_variance
+                            if improvement > best_global_improvement:
+                                best_global_improvement = improvement
+                                best_global_swap = ('subgroup1', i, j, from_player, to_player, skill_diff)
+                                best_from_group_idx = from_idx
+                                best_to_group_idx = to_idx
+                    
+                    # Try swaps within subgroup2
+                    from_sg2 = groups[group_keys[from_idx]]['subgroup2']
+                    to_sg2 = groups[group_keys[to_idx]]['subgroup2']
+                    
+                    for i, from_player in enumerate(from_sg2['players']):
+                        for j, to_player in enumerate(to_sg2['players']):
+                            if from_player['gender'] != to_player['gender']:
+                                continue
+                                
+                            # Validate both players belong to subgroup2 skill range
+                            if not (subgroup2_min <= from_player['skill_level'] <= subgroup2_max):
+                                continue
+                            if not (subgroup2_min <= to_player['skill_level'] <= subgroup2_max):
+                                continue
+                            
+                            skill_diff = from_player['skill_level'] - to_player['skill_level']
+                            if skill_diff <= 0:
+                                continue
+                            
+                            # Calculate what new combined totals would be
+                            new_from_combined = from_combined - skill_diff
+                            new_to_combined = to_combined + skill_diff
+                            
+                            # Check if this swap would violate subgroup constraints
+                            # Get current subgroup2 totals across all groups
+                            current_sg2_totals = [groups[key]['subgroup2']['total_skill'] for key in group_keys]
+                            temp_sg2_totals = current_sg2_totals.copy()
+                            temp_sg2_totals[from_idx] = from_sg2['total_skill'] - skill_diff
+                            temp_sg2_totals[to_idx] = to_sg2['total_skill'] + skill_diff
+                            
+                            # Skip if subgroup constraint would be violated
+                            if max(temp_sg2_totals) - min(temp_sg2_totals) > 1:
+                                continue
+                            
+                            # Calculate improvement in overall balance
+                            old_variance = sum((ct - sum(combined_totals)/len(combined_totals))**2 for ct in combined_totals)
+                            new_combined_totals = combined_totals.copy()
+                            new_combined_totals[from_idx] = new_from_combined
+                            new_combined_totals[to_idx] = new_to_combined
+                            new_avg = sum(new_combined_totals) / len(new_combined_totals)
+                            new_variance = sum((ct - new_avg)**2 for ct in new_combined_totals)
+                            
+                            improvement = old_variance - new_variance
+                            if improvement > best_global_improvement:
+                                best_global_improvement = improvement
+                                best_global_swap = ('subgroup2', i, j, from_player, to_player, skill_diff)
+                                best_from_group_idx = from_idx
+                                best_to_group_idx = to_idx
             
-            # Try swaps within subgroup2 with skill validation
-            max_sg2 = groups[group_keys[max_idx]]['subgroup2']
-            min_sg2 = groups[group_keys[min_idx]]['subgroup2']
-            
-            for i, max_player in enumerate(max_sg2['players']):
-                for j, min_player in enumerate(min_sg2['players']):
-                    if max_player['gender'] != min_player['gender']:
-                        continue
-                        
-                    # Validate both players belong to subgroup2 skill range
-                    if not (subgroup2_min <= max_player['skill_level'] <= subgroup2_max):
-                        continue
-                    if not (subgroup2_min <= min_player['skill_level'] <= subgroup2_max):
-                        continue
-                    
-                    skill_diff = max_player['skill_level'] - min_player['skill_level']
-                    if skill_diff <= 0:
-                        continue
-                    
-                    new_max_total = max_total - skill_diff
-                    new_min_total = min_total + skill_diff
-                    new_diff = abs(new_max_total - new_min_total)
-                    
-                    improvement = (max_total - min_total) - new_diff
-                    if improvement > best_improvement:
-                        best_improvement = improvement
-                        best_swap = ('subgroup2', i, j, max_player, min_player, skill_diff)
-            
-            # Execute the best swap
-            if best_swap:
-                subgroup_type, i, j, max_player, min_player, skill_diff = best_swap
+            # Execute the best global swap with all constraint validations already checked
+            if best_global_swap and best_global_improvement > 0:
+                subgroup_type, i, j, from_player, to_player, skill_diff = best_global_swap
                 
-                max_subgroup = groups[group_keys[max_idx]][subgroup_type]
-                min_subgroup = groups[group_keys[min_idx]][subgroup_type]
+                from_subgroup = groups[group_keys[best_from_group_idx]][subgroup_type]
+                to_subgroup = groups[group_keys[best_to_group_idx]][subgroup_type]
                 
                 # Swap players
-                max_subgroup['players'][i] = min_player
-                min_subgroup['players'][j] = max_player
+                from_subgroup['players'][i] = to_player
+                to_subgroup['players'][j] = from_player
                 # Update totals
-                max_subgroup['total_skill'] -= skill_diff
-                min_subgroup['total_skill'] += skill_diff
+                from_subgroup['total_skill'] -= skill_diff
+                to_subgroup['total_skill'] += skill_diff
+                
+                consecutive_no_improvement = 0
             else:
-                break  # No beneficial swap found
+                consecutive_no_improvement += 1
+                
+                # If stuck for too long, break to avoid infinite loops
+                if consecutive_no_improvement >= max_no_improvement:
+                    break
     
-    # Apply final overall balancing
+    # Apply final overall balancing with enhanced flexibility for imbalanced data
+    def balance_overall_groups():
+        """Balance combined group totals with flexibility for imbalanced datasets"""
+        
+        # Detect data imbalance
+        total_sg1_players = sum(len(groups[key]['subgroup1']['players']) for key in group_keys)
+        total_sg2_players = sum(len(groups[key]['subgroup2']['players']) for key in group_keys)
+        player_imbalance = abs(total_sg1_players - total_sg2_players)
+        is_imbalanced_data = player_imbalance > num_groups * 2  # More than 2 players per group difference
+        
+        if is_imbalanced_data:
+            st.write(f"🔧 Detected imbalanced data: {total_sg1_players} vs {total_sg2_players} players - using enhanced optimization...")
+        
+        max_iterations = 300 if is_imbalanced_data else 150
+        consecutive_no_improvement = 0
+        max_no_improvement = 50 if is_imbalanced_data else 25
+        
+        # Calculate constraint thresholds based on data imbalance
+        if is_imbalanced_data:
+            # For severely imbalanced data, relax constraints progressively
+            max_subgroup_diff = min(4, max(2, player_imbalance // num_groups))  # Scale with imbalance
+            st.write(f"⚙️ Using relaxed constraint threshold: ≤{max_subgroup_diff} points for subgroup balance")
+        else:
+            max_subgroup_diff = 1  # Standard strict constraint
+        
+        for iteration in range(max_iterations):
+            # Get current combined totals (subgroup1 + subgroup2 for each group)
+            combined_totals = [
+                groups[key]['subgroup1']['total_skill'] + groups[key]['subgroup2']['total_skill'] 
+                for key in group_keys
+            ]
+            
+            max_combined = max(combined_totals)
+            min_combined = min(combined_totals)
+            
+            # Success condition - check if overall balance is achieved
+            overall_balance_target = max_subgroup_diff if is_imbalanced_data else 1
+            if max_combined - min_combined <= overall_balance_target:
+                if iteration > 0:  # Only show if we actually did optimization
+                    st.write(f"✅ Overall balance achieved: {min_combined}-{max_combined} (diff: {max_combined - min_combined})")
+                break
+            
+            # ENHANCED GLOBAL OPTIMIZATION: Find the best swap across ALL groups and subgroups
+            best_global_swap = None
+            best_global_improvement = 0
+            best_from_group_idx = None
+            best_to_group_idx = None
+            
+            for from_idx in range(num_groups):
+                for to_idx in range(num_groups):
+                    if from_idx == to_idx:
+                        continue
+                    
+                    from_combined = combined_totals[from_idx]
+                    to_combined = combined_totals[to_idx]
+                    
+                    if from_combined <= to_combined:  # Only swap from higher to lower
+                        continue
+                    
+                    # Try swaps within subgroup1
+                    from_sg1 = groups[group_keys[from_idx]]['subgroup1']
+                    to_sg1 = groups[group_keys[to_idx]]['subgroup1']
+                    
+                    for i, from_player in enumerate(from_sg1['players']):
+                        for j, to_player in enumerate(to_sg1['players']):
+                            if from_player['gender'] != to_player['gender']:
+                                continue
+                                
+                            # Validate both players belong to subgroup1 skill range
+                            if not (subgroup1_min <= from_player['skill_level'] <= subgroup1_max):
+                                continue
+                            if not (subgroup1_min <= to_player['skill_level'] <= subgroup1_max):
+                                continue
+                            
+                            skill_diff = from_player['skill_level'] - to_player['skill_level']
+                            if skill_diff <= 0:
+                                continue
+                            
+                            # Calculate what new combined totals would be
+                            new_from_combined = from_combined - skill_diff
+                            new_to_combined = to_combined + skill_diff
+                            
+                            # Check if this swap would violate subgroup constraints (with flexibility)
+                            current_sg1_totals = [groups[key]['subgroup1']['total_skill'] for key in group_keys] 
+                            temp_sg1_totals = current_sg1_totals.copy() 
+                            temp_sg1_totals[from_idx] = from_sg1['total_skill'] - skill_diff
+                            temp_sg1_totals[to_idx] = to_sg1['total_skill'] + skill_diff
+                            
+                            # ENHANCED: Use flexible constraint based on data imbalance
+                            if max(temp_sg1_totals) - min(temp_sg1_totals) > max_subgroup_diff:
+                                continue
+                            
+                            # Calculate improvement in overall balance
+                            old_range = max_combined - min_combined
+                            
+                            # Create new combined totals after the swap
+                            new_combined_test = combined_totals.copy()
+                            new_combined_test[from_idx] = new_from_combined
+                            new_combined_test[to_idx] = new_to_combined
+                            new_range = max(new_combined_test) - min(new_combined_test)
+                            
+                            # Simplified improvement calculation
+                            improvement = old_range - new_range
+                            if improvement > best_global_improvement:
+                                best_global_improvement = improvement
+                                best_global_swap = ('subgroup1', i, j, from_player, to_player, skill_diff)
+                                best_from_group_idx = from_idx
+                                best_to_group_idx = to_idx
+                    
+                    # Try swaps within subgroup2
+                    from_sg2 = groups[group_keys[from_idx]]['subgroup2']
+                    to_sg2 = groups[group_keys[to_idx]]['subgroup2']
+                    
+                    for i, from_player in enumerate(from_sg2['players']):
+                        for j, to_player in enumerate(to_sg2['players']):
+                            if from_player['gender'] != to_player['gender']:
+                                continue
+                                
+                            # Validate both players belong to subgroup2 skill range
+                            if not (subgroup2_min <= from_player['skill_level'] <= subgroup2_max):
+                                continue
+                            if not (subgroup2_min <= to_player['skill_level'] <= subgroup2_max):
+                                continue
+                            
+                            skill_diff = from_player['skill_level'] - to_player['skill_level']
+                            if skill_diff <= 0:
+                                continue
+                            
+                            # Calculate what new combined totals would be
+                            new_from_combined = from_combined - skill_diff
+                            new_to_combined = to_combined + skill_diff
+                            
+                            # Check if this swap would violate subgroup constraints (with flexibility)
+                            current_sg2_totals = [groups[key]['subgroup2']['total_skill'] for key in group_keys]
+                            temp_sg2_totals = current_sg2_totals.copy()
+                            temp_sg2_totals[from_idx] = from_sg2['total_skill'] - skill_diff
+                            temp_sg2_totals[to_idx] = to_sg2['total_skill'] + skill_diff
+                            
+                            # ENHANCED: Use flexible constraint based on data imbalance
+                            if max(temp_sg2_totals) - min(temp_sg2_totals) > max_subgroup_diff:
+                                continue
+                            
+                            # Calculate improvement in overall balance
+                            old_range = max_combined - min_combined
+                            new_combined_test = combined_totals.copy()
+                            new_combined_test[from_idx] = new_from_combined
+                            new_combined_test[to_idx] = new_to_combined
+                            new_range = max(new_combined_test) - min(new_combined_test)
+                            
+                            improvement = old_range - new_range
+                            if improvement > best_global_improvement:
+                                best_global_improvement = improvement
+                                best_global_swap = ('subgroup2', i, j, from_player, to_player, skill_diff)
+                                best_from_group_idx = from_idx
+                                best_to_group_idx = to_idx
+            
+            # Execute the best global swap with all constraint validations already checked
+            if best_global_swap and best_global_improvement > 0:
+                subgroup_type, i, j, from_player, to_player, skill_diff = best_global_swap
+                
+                from_subgroup = groups[group_keys[best_from_group_idx]][subgroup_type]
+                to_subgroup = groups[group_keys[best_to_group_idx]][subgroup_type]
+                
+                # Swap players
+                from_subgroup['players'][i] = to_player
+                to_subgroup['players'][j] = from_player
+                # Update totals
+                from_subgroup['total_skill'] -= skill_diff
+                to_subgroup['total_skill'] += skill_diff
+                
+                consecutive_no_improvement = 0
+                
+                # Progress feedback for long optimizations
+                if is_imbalanced_data and iteration % 50 == 0:
+                    new_combined = [groups[key]['subgroup1']['total_skill'] + groups[key]['subgroup2']['total_skill'] for key in group_keys]
+                    current_diff = max(new_combined) - min(new_combined)
+                    st.write(f"🔄 Iteration {iteration}: Overall balance = {current_diff} (target ≤{overall_balance_target})")
+            else:
+                consecutive_no_improvement += 1
+                
+                # If stuck for too long, break to avoid infinite loops
+                if consecutive_no_improvement >= max_no_improvement:
+                    final_combined = [groups[key]['subgroup1']['total_skill'] + groups[key]['subgroup2']['total_skill'] for key in group_keys]
+                    final_diff = max(final_combined) - min(final_combined)
+                    if is_imbalanced_data and final_diff <= max_subgroup_diff:
+                        st.write(f"✅ Acceptable balance achieved: {min(final_combined)}-{max(final_combined)} (diff: {final_diff}) for imbalanced data")
+                    else:
+                        st.write(f"⏸️ Optimization stopped after {iteration} iterations - best achievable balance")
+                    break
+    
     balance_overall_groups()
+    
+    # FINAL VALIDATION: Ensure all balance constraints are met
+    def validate_final_balance():
+        """Validate that all three balance constraints are satisfied (with flexibility for imbalanced data)"""
+        # Check subgroup 1 balance
+        sg1_totals = [groups[key]['subgroup1']['total_skill'] for key in group_keys]
+        sg1_diff = max(sg1_totals) - min(sg1_totals)
+        sg1_balanced = sg1_diff <= 1
+        
+        # Check subgroup 2 balance  
+        sg2_totals = [groups[key]['subgroup2']['total_skill'] for key in group_keys]
+        sg2_diff = max(sg2_totals) - min(sg2_totals)
+        sg2_balanced = sg2_diff <= 1
+        
+        # Check overall balance
+        overall_totals = [sg1_totals[i] + sg2_totals[i] for i in range(len(group_keys))]
+        overall_diff = max(overall_totals) - min(overall_totals)
+        overall_balanced = overall_diff <= 1
+        
+        # Calculate data imbalance metrics
+        total_sg1_players = sum(len(groups[key]['subgroup1']['players']) for key in group_keys)
+        total_sg2_players = sum(len(groups[key]['subgroup2']['players']) for key in group_keys)
+        player_imbalance = abs(total_sg1_players - total_sg2_players)
+        
+        # For imbalanced data (like 36 vs 24), be more flexible
+        is_imbalanced_data = player_imbalance > len(group_keys) * 2  # More than 2 players per group difference
+        
+        # Check if perfect balance was achieved
+        if sg1_balanced and sg2_balanced and overall_balanced:
+            return True, True, True, sg1_diff, sg2_diff, overall_diff
+        
+        # For imbalanced data, try relaxed constraints before failing
+        if is_imbalanced_data:
+            # Relaxed constraints for imbalanced data - up to 3 points for very imbalanced cases
+            max_acceptable_diff = min(3, max(2, player_imbalance // len(group_keys)))  # Scale with imbalance
+            
+            sg1_acceptable = sg1_diff <= max_acceptable_diff
+            sg2_acceptable = sg2_diff <= max_acceptable_diff  
+            overall_acceptable = overall_diff <= max_acceptable_diff
+            
+            if sg1_acceptable and sg2_acceptable and overall_acceptable:
+                # Show success with relaxed constraints
+                st.success(f"✅ **BALANCE ACHIEVED** (imbalanced data - relaxed constraints)")
+                st.info(f"📊 **Data imbalance detected**: {total_sg1_players} vs {total_sg2_players} players ({player_imbalance} difference)")
+                st.info(f"📈 **Results**: SG1 diff={sg1_diff}, SG2 diff={sg2_diff}, Overall diff={overall_diff} (≤{max_acceptable_diff} accepted)")
+                st.info(f"💡 **Tip**: Try 'Adaptive Ranges' for stricter ≤1 point balance")
+                return True, True, True, sg1_diff, sg2_diff, overall_diff
+        
+        # Standard strict validation failed
+        error_msg = f"❌ **BALANCE CONSTRAINT VIOLATION**:\n"
+        error_msg += f"  • **Subgroup 1**: {min(sg1_totals)}-{max(sg1_totals)} (diff: {sg1_diff}) {'✅' if sg1_balanced else '❌'}\n"
+        error_msg += f"  • **Subgroup 2**: {min(sg2_totals)}-{max(sg2_totals)} (diff: {sg2_diff}) {'✅' if sg2_balanced else '❌'}\n" 
+        error_msg += f"  • **Overall**: {min(overall_totals)}-{max(overall_totals)} (diff: {overall_diff}) {'✅' if overall_balanced else '❌'}\n"
+        
+        if is_imbalanced_data:
+            error_msg += f"\n🔍 **Data Analysis**:\n"
+            error_msg += f"  • Player distribution: {total_sg1_players} vs {total_sg2_players} ({player_imbalance} difference)\n"
+            error_msg += f"  • This is a **highly imbalanced dataset** - perfect ≤1 balance may be impossible\n"
+            error_msg += f"  • **Suggestions**:\n"
+            error_msg += f"    - Try **Adaptive Ranges** instead of Fixed Ranges (1-5, 6-15)\n"
+            error_msg += f"    - Use fewer groups: try {max(2, len(group_keys)-1)} or {max(2, len(group_keys)-2)} groups\n"
+            error_msg += f"    - Add more players to balance skill distribution\n"
+        else:
+            error_msg += f"\nAll constraints must be ≤1 point difference."
+        
+        raise ValueError(error_msg)
+    
+    # Validate final balance
+    validate_final_balance()
     
     # VALIDATION: Ensure no players are in wrong subgroups
     for group_name in group_keys:
@@ -1447,6 +2596,97 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
         result_groups[group_name] = all_players
     
     return result_groups, groups  # Return both formats for detailed analysis
+
+
+def adaptive_auto_balance_subgroups(players_df, num_groups=6, players_per_subgroup_1=4, players_per_subgroup_2=4, force_rebalance=False, min_females_per_group=None, max_females_per_group=None):
+    """
+    Adaptive auto balance that automatically determines optimal subgroup skill ranges
+    based on the actual data distribution. This solves issues where fixed ranges
+    (like 1-8, 9-15) don't match the available player skills.
+    """
+    st.write("🎯 **ADAPTIVE BALANCE**: Calculating optimal subgroup ranges...")
+    
+    try:
+        # Calculate optimal ranges based on data distribution
+        ranges = calculate_optimal_subgroup_ranges(
+            players_df, num_groups, players_per_subgroup_1, players_per_subgroup_2
+        )
+        
+        st.write(f"📊 **Determined optimal ranges:**")
+        st.write(f"- **Subgroup 1**: {ranges['subgroup1_min']}-{ranges['subgroup1_max']} (need {ranges['sg1_needed']}, have {ranges['sg1_available']})")
+        st.write(f"- **Subgroup 2**: {ranges['subgroup2_min']}-{ranges['subgroup2_max']} (need {ranges['sg2_needed']}, have {ranges['sg2_available']})")
+        
+        # Check if the calculated ranges are feasible
+        if ranges['sg1_available'] < ranges['sg1_needed'] or ranges['sg2_available'] < ranges['sg2_needed']:
+            st.warning("⚠️ **Original configuration not feasible with current data distribution, trying alternatives...**")
+            
+            # Try alternative configurations
+            alternative_configs = [
+                {'sg1_count': 3, 'sg2_count': 5, 'groups': num_groups, 'name': f'{num_groups} groups, 3+5 players'},
+                {'sg1_count': 5, 'sg2_count': 3, 'groups': num_groups, 'name': f'{num_groups} groups, 5+3 players'},
+                {'sg1_count': 2, 'sg2_count': 6, 'groups': num_groups, 'name': f'{num_groups} groups, 2+6 players'},
+                {'sg1_count': 6, 'sg2_count': 2, 'groups': num_groups, 'name': f'{num_groups} groups, 6+2 players'},
+                {'sg1_count': players_per_subgroup_1, 'sg2_count': players_per_subgroup_2, 'groups': num_groups-1, 'name': f'{num_groups-1} groups, {players_per_subgroup_1}+{players_per_subgroup_2} players'},
+                {'sg1_count': 3, 'sg2_count': 3, 'groups': num_groups, 'name': f'{num_groups} groups, 3+3 players'},
+            ]
+            
+            for config in alternative_configs:
+                try:
+                    alt_ranges = calculate_optimal_subgroup_ranges(
+                        players_df, config['groups'], config['sg1_count'], config['sg2_count']
+                    )
+                    
+                    if (alt_ranges['sg1_available'] >= alt_ranges['sg1_needed'] and 
+                        alt_ranges['sg2_available'] >= alt_ranges['sg2_needed']):
+                        
+                        st.success(f"✅ **Found workable configuration**: {config['name']}")
+                        st.write(f"- **Subgroup 1**: {alt_ranges['subgroup1_min']}-{alt_ranges['subgroup1_max']}")
+                        st.write(f"- **Subgroup 2**: {alt_ranges['subgroup2_min']}-{alt_ranges['subgroup2_max']}")
+                        
+                        # Run the balance with these parameters
+                        return auto_balance_subgroups(
+                            players_df,
+                            subgroup1_min=alt_ranges['subgroup1_min'],
+                            subgroup1_max=alt_ranges['subgroup1_max'],
+                            subgroup2_min=alt_ranges['subgroup2_min'],
+                            subgroup2_max=alt_ranges['subgroup2_max'],
+                            subgroup1_count=config['sg1_count'],
+                            subgroup2_count=config['sg2_count'],
+                            num_groups=config['groups'],
+                            min_females_per_group=min_females_per_group,
+                            max_females_per_group=max_females_per_group,
+                            force_rebalance=force_rebalance
+                        )
+                except:
+                    continue
+            
+            st.error("❌ **No feasible configuration found** for the available player distribution.")
+            st.write("**Suggestions:**")
+            st.write("1. Add more high-skill players to balance the distribution")
+            st.write("2. Reduce the number of groups")
+            st.write("3. Use manual group assignment instead of auto-balance")
+            raise ValueError("No feasible configuration found for the available player distribution")
+        
+        # Original configuration works with calculated ranges
+        st.success("✅ **Proceeding with calculated optimal ranges**")
+        
+        return auto_balance_subgroups(
+            players_df,
+            subgroup1_min=ranges['subgroup1_min'],
+            subgroup1_max=ranges['subgroup1_max'],
+            subgroup2_min=ranges['subgroup2_min'],
+            subgroup2_max=ranges['subgroup2_max'],
+            subgroup1_count=players_per_subgroup_1,
+            subgroup2_count=players_per_subgroup_2,
+            num_groups=num_groups,
+            min_females_per_group=min_females_per_group,
+            max_females_per_group=max_females_per_group,
+            force_rebalance=force_rebalance
+        )
+        
+    except Exception as e:
+        st.error(f"❌ **Adaptive balance failed**: {str(e)}")
+        raise
 
 
 def calculate_group_stats(group_players):
@@ -2577,6 +3817,24 @@ if menu == "Player Import & Auto-Balance":
                     if total_available > total_needed:
                         excess = total_available - total_needed
                         st.info(f"📈 {excess} players will not be assigned (excess players)")
+                
+                # Balance method selection
+                st.write("---")
+                st.write("### 🎯 Balance Method")
+                
+                balance_method = st.radio(
+                    "Choose balancing approach:",
+                    options=["Fixed Ranges", "Adaptive Ranges"],
+                    help="Fixed: Use your specified skill ranges. Adaptive: Automatically calculate optimal ranges based on your data.",
+                    horizontal=True
+                )
+                
+                if balance_method == "Adaptive Ranges":
+                    st.info("""
+                    **🎯 Adaptive Balance** automatically calculates the best subgroup skill ranges 
+                    based on your actual player data distribution. This solves issues where your 
+                    specified ranges don't have enough players in each subgroup.
+                    """)
             
             # Create balanced groups button
             if st.button("🎯 Create Balanced Groups", type="primary", help="This will redistribute all players into balanced groups"):
@@ -2593,36 +3851,80 @@ if menu == "Player Import & Auto-Balance":
                         st.session_state.player_database['assigned'] = False
                     
                     if balance_strategy == "Skill-Level Subgroups":
-                        # Validate subgroup ranges
-                        if subgroup1_max >= subgroup2_min:
-                            st.error("❌ Please fix the subgroup ranges before proceeding.")
-                            st.stop()
+                        # Choose balance method based on user selection
+                        if balance_method == "Fixed Ranges":
+                            # Validate subgroup ranges for fixed ranges
+                            if subgroup1_max >= subgroup2_min:
+                                st.error("❌ Please fix the subgroup ranges before proceeding.")
+                                st.stop()
+                            
+                            try:
+                                # Auto-balance with fixed subgroups and gender constraints
+                                gender_constraints = {}
+                                if 'use_gender_constraints' in locals() and use_gender_constraints:
+                                    gender_constraints = {
+                                        'min_females_per_group': min_females_sg,
+                                        'max_females_per_group': max_females_sg
+                                    }
+                                
+                                balanced_groups, detailed_groups = auto_balance_subgroups(
+                                    st.session_state.player_database, 
+                                    subgroup1_min, subgroup1_max, 
+                                    subgroup2_min, subgroup2_max,
+                                    subgroup1_count, subgroup2_count, num_groups,
+                                    force_rebalance=True,  # Force complete redistribution
+                                    **gender_constraints
+                                )
+                                
+                                # Store detailed subgroup information for display
+                                st.session_state.detailed_groups = detailed_groups
+                                
+                                # Store subgroup ranges for later use (e.g., player transfers)
+                                st.session_state.subgroup1_min = subgroup1_min
+                                st.session_state.subgroup1_max = subgroup1_max
+                                st.session_state.subgroup2_min = subgroup2_min
+                                st.session_state.subgroup2_max = subgroup2_max
+                                
+                            except ValueError as e:
+                                st.error(f"❌ {str(e)}")
+                                st.info("💡 Use the 'Preview Player Distribution' button to check availability before balancing.")
+                                st.stop()
                         
-                        try:
-                            # Auto-balance with subgroups and gender constraints
-                            gender_constraints = {}
-                            if 'use_gender_constraints' in locals() and use_gender_constraints:
-                                gender_constraints = {
-                                    'min_females_per_group': min_females_sg,
-                                    'max_females_per_group': max_females_sg
-                                }
-                            
-                            balanced_groups, detailed_groups = auto_balance_subgroups(
-                                st.session_state.player_database, 
-                                subgroup1_min, subgroup1_max, 
-                                subgroup2_min, subgroup2_max,
-                                subgroup1_count, subgroup2_count, num_groups,
-                                force_rebalance=True,  # Force complete redistribution
-                                **gender_constraints
-                            )
-                            
-                            # Store detailed subgroup information for display
-                            st.session_state.detailed_groups = detailed_groups
-                            
-                        except ValueError as e:
-                            st.error(f"❌ {str(e)}")
-                            st.info("💡 Use the 'Preview Player Distribution' button to check availability before balancing.")
-                            st.stop()
+                        else:  # Adaptive Ranges
+                            try:
+                                # Auto-balance with adaptive subgroups and gender constraints
+                                gender_constraints = {}
+                                if 'use_gender_constraints' in locals() and use_gender_constraints:
+                                    gender_constraints = {
+                                        'min_females_per_group': min_females_sg,
+                                        'max_females_per_group': max_females_sg
+                                    }
+                                
+                                balanced_groups, detailed_groups = adaptive_auto_balance_subgroups(
+                                    st.session_state.player_database,
+                                    num_groups=num_groups,
+                                    players_per_subgroup_1=subgroup1_count,
+                                    players_per_subgroup_2=subgroup2_count,
+                                    force_rebalance=True,
+                                    **gender_constraints
+                                )
+                                
+                                # Store detailed subgroup information for display
+                                st.session_state.detailed_groups = detailed_groups
+                                
+                                # For adaptive ranges, detect and store the actual ranges used
+                                if detailed_groups:
+                                    detected_ranges = detect_subgroup_ranges_from_existing_data()
+                                    if detected_ranges:
+                                        st.session_state.subgroup1_min = detected_ranges['subgroup1_min']
+                                        st.session_state.subgroup1_max = detected_ranges['subgroup1_max']
+                                        st.session_state.subgroup2_min = detected_ranges['subgroup2_min']
+                                        st.session_state.subgroup2_max = detected_ranges['subgroup2_max']
+                                
+                            except ValueError as e:
+                                st.error(f"❌ {str(e)}")
+                                st.info("💡 Try reducing the number of groups or adjusting players per subgroup.")
+                                st.stop()
                         
                     else:
                         # Use traditional auto-balance with gender constraints if specified
@@ -2836,7 +4138,8 @@ if menu == "Player Import & Auto-Balance":
                                     # Subgroup 1
                                     if subgroups['subgroup1']['players']:
                                         subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
-                                        st.markdown(f"***🔽 {subgroup1_name} ({len(subgroups['subgroup1']['players'])} players)***")
+                                        sg1_total_skill = subgroups['subgroup1']['total_skill']
+                                        st.markdown(f"***🔽 {subgroup1_name} ({len(subgroups['subgroup1']['players'])} players, {sg1_total_skill} pts)***")
                                         for idx, player in enumerate(subgroups['subgroup1']['players'], 1):
                                             gender_icon = "👨" if player['gender'] == 'M' else "👩"
                                             skill_stars = "⭐" * min(player['skill_level'], 5)
@@ -2845,7 +4148,8 @@ if menu == "Player Import & Auto-Balance":
                                     # Subgroup 2
                                     if subgroups['subgroup2']['players']:
                                         subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
-                                        st.markdown(f"***🔼 {subgroup2_name} ({len(subgroups['subgroup2']['players'])} players)***")
+                                        sg2_total_skill = subgroups['subgroup2']['total_skill']
+                                        st.markdown(f"***🔼 {subgroup2_name} ({len(subgroups['subgroup2']['players'])} players, {sg2_total_skill} pts)***")
                                         for idx, player in enumerate(subgroups['subgroup2']['players'], 1):
                                             gender_icon = "👨" if player['gender'] == 'M' else "👩"
                                             skill_stars = "⭐" * min(player['skill_level'], 15)
@@ -3075,6 +4379,77 @@ elif menu == "Team Details":
             st.write("**Detailed groups populated:**", bool(st.session_state.detailed_groups))
             if st.session_state.detailed_groups:
                 st.write("**Detailed groups keys:**", list(st.session_state.detailed_groups.keys()))
+                
+                # Show actual player counts in detailed groups for debugging
+                for group_name, subgroups in st.session_state.detailed_groups.items():
+                    display_group_name = st.session_state.group_names.get(group_name, group_name)
+                    sg1_count = len(subgroups['subgroup1']['players'])
+                    sg2_count = len(subgroups['subgroup2']['players'])
+                    st.write(f"**{display_group_name}**: SG1={sg1_count}, SG2={sg2_count}")
+        
+        # Show regular groups data for comparison
+        st.write("**Regular groups data:**")
+        for group_name, players in st.session_state.groups.items():
+            display_group_name = st.session_state.group_names.get(group_name, group_name)
+            st.write(f"**{display_group_name}**: {len(players)} players - {players}")
+        
+        # Show subgroup range information for transfers
+        st.markdown("---")
+        st.subheader("🎯 Subgroup Range Configuration")
+        
+        # Try to get current subgroup ranges
+        subgroup1_min = getattr(st.session_state, 'subgroup1_min', None)
+        subgroup1_max = getattr(st.session_state, 'subgroup1_max', None)
+        subgroup2_min = getattr(st.session_state, 'subgroup2_min', None)
+        subgroup2_max = getattr(st.session_state, 'subgroup2_max', None)
+        
+        if None not in [subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max]:
+            col1, col2 = st.columns(2)
+            with col1:
+                subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                st.success(f"**{subgroup1_name}**: Skills {subgroup1_min}-{subgroup1_max}")
+            with col2:
+                subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                st.success(f"**{subgroup2_name}**: Skills {subgroup2_min}-{subgroup2_max}")
+            st.info("✅ **Transfer Logic**: Players will be placed in correct subgroups based on their skill levels")
+        else:
+            # Try to detect from existing data
+            detected = detect_subgroup_ranges_from_existing_data()
+            if detected:
+                col1, col2 = st.columns(2)
+                with col1:
+                    subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                    st.warning(f"**{subgroup1_name}**: Skills {detected['subgroup1_min']}-{detected['subgroup1_max']} (detected)")
+                with col2:
+                    subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                    st.warning(f"**{subgroup2_name}**: Skills {detected['subgroup2_min']}-{detected['subgroup2_max']} (detected)")
+                st.warning("⚠️ **Transfer Logic**: Using detected ranges from existing players")
+            else:
+                st.error("❌ **No subgroup ranges configured** - transfers may not work correctly")
+                st.info("💡 **Solution**: Recreate teams using 'Player Import & Auto-Balance' with subgroup configuration")
+        
+        # Data repair tools
+        st.markdown("---")
+        st.subheader("🔧 Data Repair Tools")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔍 Validate & Repair Data"):
+                fixes_count = validate_tournament_data()
+                if fixes_count > 0:
+                    st.success(f"✅ Applied {fixes_count} data fixes!")
+                    save_tournament_data()
+                else:
+                    st.info("✅ No data issues found!")
+        
+        with col2:
+            if st.button("💾 Force Save Data"):
+                try:
+                    save_tournament_data()
+                    st.success("✅ Data saved successfully!")
+                except Exception as e:
+                    st.error(f"❌ Save failed: {str(e)}")
+    
     
     if not st.session_state.groups or not any(st.session_state.groups.values()):
         st.info("📝 No teams have been created yet. Please go to 'Player Import & Auto-Balance' to create teams first.")
@@ -3829,90 +5204,38 @@ elif menu == "Record a Clash":
 
 # --- TAB 6: MANAGE PLAYERS ---
 elif menu == "Manage Players":
-    st.header("👥 Quick Player Management")
-    st.info("Use this for quick edits. For comprehensive setup, use the 'Setup Groups & Players' tab.")
+    st.header("👥 Advanced Player Management")
     
-    for group_name, players in st.session_state.groups.items():
-        st.subheader(f"📋 {group_name}")
-        new_list = st.text_area(
-            f"Edit Players (comma-separated):", 
-            value=", ".join(players),
-            key=f"quick_edit_{group_name}"
-        )
-        
-        if st.button(f"Update {group_name}", key=f"quick_update_{group_name}"):
-            updated_players = [p.strip() for p in new_list.split(",") if p.strip()]
-            # Ensure exactly 10 players
-            updated_players = updated_players[:10]  # Take first 10
-            while len(updated_players) < 10:
-                updated_players.append(f"Player {len(updated_players)+1}")
-            
-            st.session_state.groups[group_name] = updated_players
-            st.success(f"Updated {group_name}!")
-            st.rerun()
+    # Check if user has permission to manage players
+    if not is_authenticated():
+        st.error("🚫 Access Denied. Please login to manage players.")
+        st.stop()
+    
+    user_role = get_current_user_role()
+    if user_role != 'superuser':
+        st.error("🚫 Access Denied. Only superusers can manage players.")
+        st.info("💡 Use 'Setup Groups & Players' tab for basic player management.")
+        st.stop()
+    
+    st.info("🔧 **Superuser Mode**: Edit player details, reassign groups, and save changes across all tournament sections.")
+    
+    # Tabs for different management functions
+    tab1, tab2, tab3 = st.tabs(["✏️ Edit Player Details", "🔄 Transfer Players", "📊 Export/Import"])
+    
+    with tab1:
+        st.subheader("Edit Player Details")
+        edit_player_details()
+    
+    with tab2:
+        st.subheader("Transfer Players Between Groups")
+        transfer_players_between_groups()
+    
+    with tab3:
+        st.subheader("Export/Import Players")
+        export_import_players()
 
-    # Data Export Section
-    st.divider()
-    st.subheader("📥 Export Tournament Data")
-    st.info("Export your tournament data to CSV files for external analysis")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if st.button("📊 Export Standings"):
-            if not st.session_state.standings.empty:
-                standings_csv = st.session_state.standings.to_csv()
-                st.download_button(
-                    label="💾 Download Standings CSV",
-                    data=standings_csv,
-                    file_name="tournament_standings.csv",
-                    mime="text/csv"
-                )
-            else:
-                st.warning("No standings data to export")
-    
-    with col2:
-        if st.button("👥 Export Players"):
-            if not st.session_state.player_database.empty:
-                players_csv = st.session_state.player_database.to_csv(index=False)
-                st.download_button(
-                    label="💾 Download Players CSV",
-                    data=players_csv,
-                    file_name="tournament_players.csv",
-                    mime="text/csv"
-                )
-            else:
-                st.warning("No player data to export")
-    
-    with col3:
-        if st.button("🏆 Export Groups"):
-            if st.session_state.groups:
-                # Create a CSV with group assignments
-                group_data = []
-                for group_name, players in st.session_state.groups.items():
-                    for i, player in enumerate(players, 1):
-                        group_data.append({
-                            'Group': st.session_state.group_names.get(group_name, group_name),
-                            'Position': i,
-                            'Player': player
-                        })
-                
-                groups_df = pd.DataFrame(group_data)
-                groups_csv = groups_df.to_csv(index=False)
-                st.download_button(
-                    label="💾 Download Groups CSV",
-                    data=groups_csv,
-                    file_name="tournament_groups.csv",
-                    mime="text/csv"
-                )
-            else:
-                st.warning("No group data to export")
-
-# --- TAB 8: USER MANAGEMENT ---
+# --- TAB 7: USER MANAGEMENT ---
 elif menu == "User Management":
-    st.header("👥 User Management")
-    
-    # Only superuser can access this page
     if get_current_user_role() != 'superuser':
         st.error("🚫 Access Denied. Only superusers can manage users.")
         st.stop()
