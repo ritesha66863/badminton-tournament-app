@@ -845,7 +845,7 @@ if not is_authenticated() and not st.session_state.get('public_access', False):
 # Build navigation menu based on user permissions
 available_pages = []
 all_pages = ["Player Import & Auto-Balance", "Setup Groups & Players", "Team Details", 
-            "Match Schedule", "Standings & Qualifiers", "Record a Clash", "Manage Players", "User Management"]
+            "Enable Team Validation", "Match Schedule", "Standings & Qualifiers", "Record a Clash", "Manage Players", "User Management"]
 
 for page in all_pages:
     if can_access_page(page):
@@ -1636,13 +1636,14 @@ def export_import_players():
         st.info("💡 **Note**: After making changes, other sections (Team Details, Record a Clash, Standings, etc.) will automatically reflect the updates.")
 
 
-def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max, subgroup1_count, subgroup2_count, num_groups=6, min_females_per_group=None, max_females_per_group=None, force_rebalance=False):
+def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_min, subgroup2_max, subgroup1_count, subgroup2_count, num_groups=6, min_females_per_group=None, max_females_per_group=None, force_rebalance=False, same_team_players=None):
     """
     Auto-balance players into specified number of groups with 2 skill-based subgroups each
     Ensures skill point balance at group level, subgroup 1 level, and subgroup 2 level
     
     Args:
         min_females_per_group: Minimum number of females per group (optional)
+        same_team_players: Tuple of two player names (player1_name, player2_name) to force on same team (optional)
         max_females_per_group: Maximum number of females per group (optional)
         force_rebalance: If True, introduces randomization for different team compositions
     """
@@ -1707,6 +1708,59 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
         }
     
     group_keys = list(groups.keys())
+    
+    # Handle same team restriction
+    same_team_assignments = {}
+    if same_team_players and len(same_team_players) == 2:
+        player1_name, player2_name = same_team_players
+        
+        # Find these players in the selected player dataframes
+        player1_data = None
+        player2_data = None
+        player1_subgroup = None
+        player2_subgroup = None
+        
+        # Check in subgroup1
+        if not subgroup1_selected.empty:
+            p1_match = subgroup1_selected[subgroup1_selected['name'] == player1_name]
+            p2_match = subgroup1_selected[subgroup1_selected['name'] == player2_name]
+            
+            if not p1_match.empty:
+                player1_data = p1_match.iloc[0].to_dict()
+                player1_subgroup = 'subgroup1'
+            if not p2_match.empty:
+                player2_data = p2_match.iloc[0].to_dict()
+                player2_subgroup = 'subgroup1'
+        
+        # Check in subgroup2
+        if not subgroup2_selected.empty:
+            p1_match = subgroup2_selected[subgroup2_selected['name'] == player1_name]
+            p2_match = subgroup2_selected[subgroup2_selected['name'] == player2_name]
+            
+            if not p1_match.empty:
+                player1_data = p1_match.iloc[0].to_dict()
+                player1_subgroup = 'subgroup2'
+            if not p2_match.empty:
+                player2_data = p2_match.iloc[0].to_dict()
+                player2_subgroup = 'subgroup2'
+        
+        # Validate both players were found and determine same team group
+        if player1_data and player2_data:
+            # Choose target group (can be any group, let's use Group A for simplicity)
+            target_group = group_keys[0]  # Group A
+            same_team_assignments = {
+                'target_group': target_group,
+                'player1': {'data': player1_data, 'subgroup': player1_subgroup},
+                'player2': {'data': player2_data, 'subgroup': player2_subgroup}
+            }
+            
+            st.info(f"🔗 Forcing **{player1_name}** and **{player2_name}** to be on the same team: {st.session_state.group_names.get(target_group, target_group)}")
+        elif player1_data and not player2_data:
+            st.warning(f"⚠️ Player '{player2_name}' not found in selected skill ranges")
+        elif not player1_data and player2_data:
+            st.warning(f"⚠️ Player '{player1_name}' not found in selected skill ranges")
+        elif not player1_data and not player2_data:
+            st.warning(f"⚠️ Neither '{player1_name}' nor '{player2_name}' found in selected skill ranges")
     
     def balance_players_by_skill(players_list, subgroup_type, target_count_per_group, force_rebalance=False):
         """Balance players across all groups to minimize skill variance while respecting gender constraints"""
@@ -1784,28 +1838,54 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
             male_idx += 1
     
     def distribute_by_skill_only(players_list, subgroup_type, target_count_per_group):
-        """Original skill-only distribution method"""
-    def distribute_by_skill_only(players_list, subgroup_type, target_count_per_group):
-        """Original skill-only distribution method"""
+        """Original skill-only distribution method with same team handling"""
         # Sort players by skill level (descending)
         sorted_players = players_list.sort_values('skill_level', ascending=False).reset_index(drop=True)
         
         # Convert to list of dictionaries for easier manipulation
         player_records = sorted_players.to_dict('records')
         
-        # Initialize group assignments
+        # Handle same team assignments first
+        if same_team_assignments and subgroup_type in ['subgroup1', 'subgroup2']:
+            target_group = same_team_assignments['target_group']
+            
+            # Check if either forced player belongs to this subgroup
+            for player_key in ['player1', 'player2']:
+                player_info = same_team_assignments[player_key]
+                if player_info['subgroup'] == subgroup_type:
+                    # Find this player in player_records and assign to target group
+                    for i, player_record in enumerate(player_records):
+                        if player_record['name'] == player_info['data']['name']:
+                            # Assign to target group
+                            groups[target_group][subgroup_type]['players'].append(player_record)
+                            groups[target_group][subgroup_type]['total_skill'] += player_record['skill_level']
+                            if player_record['gender'] == 'M':
+                                groups[target_group][subgroup_type]['male_count'] += 1
+                            else:
+                                groups[target_group][subgroup_type]['female_count'] += 1
+                            
+                            # Remove from available players
+                            player_records.pop(i)
+                            break
+        
+        # Initialize group assignments for remaining players
         group_assignments = [[] for _ in range(num_groups)]
         
-        # Distribute players using a skill-balancing algorithm
+        # Distribute remaining players using a skill-balancing algorithm
         for i, player in enumerate(player_records):
             # Find the group with the lowest current total skill for this subgroup
             group_skills = []
             for j in range(num_groups):
-                current_skill = sum(p['skill_level'] for p in group_assignments[j])
-                current_count = len(group_assignments[j])
+                # Get current skill in this group (including already assigned forced players)
+                current_skill = groups[group_keys[j]][subgroup_type]['total_skill']
+                current_count = len(groups[group_keys[j]][subgroup_type]['players'])
+                current_assignments = len(group_assignments[j])
+                total_count = current_count + current_assignments
+                
                 # Only consider groups that haven't reached their target count
-                if current_count < target_count_per_group:
-                    group_skills.append((current_skill, j))
+                if total_count < target_count_per_group:
+                    total_skill = current_skill + sum(p['skill_level'] for p in group_assignments[j])
+                    group_skills.append((total_skill, j))
             
             if group_skills:
                 # Sort by current skill total (ascending) and assign to the group with lowest skill
@@ -1813,7 +1893,7 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
                 target_group_idx = group_skills[0][1]
                 group_assignments[target_group_idx].append(player)
         
-        # Assign players to groups
+        # Assign remaining players to groups
         for group_idx, assigned_players in enumerate(group_assignments):
             group_name = group_keys[group_idx]
             for player in assigned_players:
@@ -1824,7 +1904,7 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
                 else:
                     groups[group_name][subgroup_type]['female_count'] += 1
         
-        # Optimize by swapping players to reduce variance
+        # Optimize by swapping players to reduce variance (but preserve forced same team assignments)
         optimize_skill_balance(subgroup_type, target_count_per_group, force_rebalance)
     
     def optimize_skill_balance(subgroup_type, target_count_per_group, force_rebalance=False):
@@ -2506,6 +2586,217 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
     
     balance_overall_groups()
     
+    # Validate and restore same team constraint if broken during optimization
+    def validate_and_restore_same_team_constraint():
+        """Ensure same team players are still on the same team after optimization"""
+        if not same_team_assignments:
+            return
+            
+        player1_name = same_team_assignments['player1']['data']['name']
+        player2_name = same_team_assignments['player2']['data']['name']
+        target_group = same_team_assignments['target_group']
+        
+        # Find current locations of both players
+        player1_current_group = None
+        player2_current_group = None
+        
+        for group_name in group_keys:
+            for subgroup_type in ['subgroup1', 'subgroup2']:
+                for player in groups[group_name][subgroup_type]['players']:
+                    if player['name'] == player1_name:
+                        player1_current_group = group_name
+                    elif player['name'] == player2_name:
+                        player2_current_group = group_name
+        
+        # If they're not in the same group, move one to the target group
+        if player1_current_group != player2_current_group:
+            st.warning(f"⚠️ Same team constraint was disrupted during optimization. Restoring constraint...")
+            
+            # Find player2 and move them to player1's group (or target group)
+            final_target = player1_current_group if player1_current_group else target_group
+            
+            for group_name in group_keys:
+                for subgroup_type in ['subgroup1', 'subgroup2']:
+                    for i, player in enumerate(groups[group_name][subgroup_type]['players']):
+                        if player['name'] == player2_name and group_name != final_target:
+                            # Remove from current group
+                            removed_player = groups[group_name][subgroup_type]['players'].pop(i)
+                            groups[group_name][subgroup_type]['total_skill'] -= removed_player['skill_level']
+                            if removed_player['gender'] == 'M':
+                                groups[group_name][subgroup_type]['male_count'] -= 1
+                            else:
+                                groups[group_name][subgroup_type]['female_count'] -= 1
+                            
+                            # Add to target group in correct subgroup
+                            target_subgroup = same_team_assignments['player2']['subgroup']
+                            groups[final_target][target_subgroup]['players'].append(removed_player)
+                            groups[final_target][target_subgroup]['total_skill'] += removed_player['skill_level']
+                            if removed_player['gender'] == 'M':
+                                groups[final_target][target_subgroup]['male_count'] += 1
+                            else:
+                                groups[final_target][target_subgroup]['female_count'] += 1
+                            
+                            st.success(f"✅ Restored same team constraint: {player1_name} and {player2_name} are both in {st.session_state.group_names.get(final_target, final_target)}")
+                            return
+    
+    validate_and_restore_same_team_constraint()
+    
+    # EMERGENCY REBALANCE: Fix any remaining constraint violations
+    def emergency_balance_repair():
+        """Last resort: fix balance violations by targeted player transfers"""
+        max_attempts = 10
+        
+        for attempt in range(max_attempts):
+            # Check current balance
+            sg1_totals = [groups[key]['subgroup1']['total_skill'] for key in group_keys]
+            sg2_totals = [groups[key]['subgroup2']['total_skill'] for key in group_keys]
+            overall_totals = [sg1_totals[i] + sg2_totals[i] for i in range(len(group_keys))]
+            
+            sg1_diff = max(sg1_totals) - min(sg1_totals)
+            sg2_diff = max(sg2_totals) - min(sg2_totals) 
+            overall_diff = max(overall_totals) - min(overall_totals)
+            
+            # If all constraints satisfied, we're done
+            if sg1_diff <= 1 and sg2_diff <= 1 and overall_diff <= 1:
+                if attempt > 0:
+                    st.success(f"✅ Emergency repair successful after {attempt} adjustments!")
+                return True
+            
+            # Find the worst violation and fix it
+            worst_violation = max(sg1_diff, sg2_diff, overall_diff)
+            repair_made = False
+            
+            # Focus on the most problematic subgroup
+            if sg2_diff == worst_violation and sg2_diff > 1:
+                repair_made = fix_subgroup_imbalance('subgroup2', sg2_totals)
+            elif sg1_diff == worst_violation and sg1_diff > 1:
+                repair_made = fix_subgroup_imbalance('subgroup1', sg1_totals)
+            elif overall_diff > 1:
+                repair_made = fix_overall_imbalance(overall_totals)
+            
+            if not repair_made:
+                break
+                
+        return False  # Could not repair
+    
+    def fix_subgroup_imbalance(subgroup_type, current_totals):
+        """Fix imbalance within a specific subgroup"""
+        max_skill = max(current_totals)
+        min_skill = min(current_totals)
+        max_idx = current_totals.index(max_skill)
+        min_idx = current_totals.index(min_skill)
+        
+        max_group = groups[group_keys[max_idx]][subgroup_type]
+        min_group = groups[group_keys[min_idx]][subgroup_type]
+        
+        # Determine skill range for validation
+        if subgroup_type == 'subgroup1':
+            valid_min, valid_max = subgroup1_min, subgroup1_max
+        else:
+            valid_min, valid_max = subgroup2_min, subgroup2_max
+        
+        # Try to find a suitable player to transfer from max to min group
+        target_skill_transfer = (max_skill - min_skill) // 2  # Rough target
+        
+        best_player = None
+        best_improvement = 0
+        best_player_idx = -1
+        
+        for i, player in enumerate(max_group['players']):
+            # Validate skill range
+            if not (valid_min <= player['skill_level'] <= valid_max):
+                continue
+                
+            # Calculate improvement if we move this player
+            new_max = max_skill - player['skill_level']
+            new_min = min_skill + player['skill_level']
+            improvement = (max_skill - min_skill) - abs(new_max - new_min)
+            
+            if improvement > best_improvement:
+                best_improvement = improvement
+                best_player = player
+                best_player_idx = i
+        
+        # Execute transfer if beneficial
+        if best_player and best_improvement > 0:
+            # Remove from max group
+            moved_player = max_group['players'].pop(best_player_idx)
+            max_group['total_skill'] -= moved_player['skill_level']
+            if moved_player['gender'] == 'M':
+                max_group['male_count'] -= 1
+            else:
+                max_group['female_count'] -= 1
+            
+            # Add to min group
+            min_group['players'].append(moved_player)
+            min_group['total_skill'] += moved_player['skill_level']
+            if moved_player['gender'] == 'M':
+                min_group['male_count'] += 1
+            else:
+                min_group['female_count'] += 1
+            
+            st.info(f"🔧 Moved {moved_player['name']} (skill {moved_player['skill_level']}) to balance {subgroup_type}")
+            return True
+            
+        return False
+    
+    def fix_overall_imbalance(overall_totals):
+        """Fix overall group imbalance by transferring players between subgroups within groups"""
+        max_total = max(overall_totals)
+        min_total = min(overall_totals)
+        max_group_idx = overall_totals.index(max_total)
+        min_group_idx = overall_totals.index(min_total)
+        
+        max_group_name = group_keys[max_group_idx]
+        min_group_name = group_keys[min_group_idx]
+        
+        # Try to move a player from max_group to min_group
+        # Check both subgroups in max_group
+        for subgroup_type in ['subgroup1', 'subgroup2']:
+            max_subgroup = groups[max_group_name][subgroup_type]
+            
+            # Find target subgroup in min_group (same type)
+            min_subgroup = groups[min_group_name][subgroup_type]
+            
+            # Find suitable player to transfer
+            for i, player in enumerate(max_subgroup['players']):
+                # Validate this won't break subgroup constraints
+                skill_ranges = {
+                    'subgroup1': (subgroup1_min, subgroup1_max),
+                    'subgroup2': (subgroup2_min, subgroup2_max)
+                }
+                valid_min, valid_max = skill_ranges[subgroup_type]
+                
+                if valid_min <= player['skill_level'] <= valid_max:
+                    # Calculate improvement
+                    new_max_total = max_total - player['skill_level']
+                    new_min_total = min_total + player['skill_level']
+                    improvement = (max_total - min_total) - abs(new_max_total - new_min_total)
+                    
+                    if improvement > 0:
+                        # Execute transfer
+                        moved_player = max_subgroup['players'].pop(i)
+                        max_subgroup['total_skill'] -= moved_player['skill_level']
+                        if moved_player['gender'] == 'M':
+                            max_subgroup['male_count'] -= 1
+                        else:
+                            max_subgroup['female_count'] -= 1
+                        
+                        min_subgroup['players'].append(moved_player)
+                        min_subgroup['total_skill'] += moved_player['skill_level']
+                        if moved_player['gender'] == 'M':
+                            min_subgroup['male_count'] += 1
+                        else:
+                            min_subgroup['female_count'] += 1
+                        
+                        st.info(f"🔧 Moved {moved_player['name']} (skill {moved_player['skill_level']}) between groups to balance overall totals")
+                        return True
+        
+        return False
+    
+    # Run emergency repair before validation
+    emergency_balance_repair()
+    
     # FINAL VALIDATION: Ensure all balance constraints are met
     def validate_final_balance():
         """Validate that all three balance constraints are satisfied (with flexibility for imbalanced data)"""
@@ -2598,11 +2889,14 @@ def auto_balance_subgroups(players_df, subgroup1_min, subgroup1_max, subgroup2_m
     return result_groups, groups  # Return both formats for detailed analysis
 
 
-def adaptive_auto_balance_subgroups(players_df, num_groups=6, players_per_subgroup_1=4, players_per_subgroup_2=4, force_rebalance=False, min_females_per_group=None, max_females_per_group=None):
+def adaptive_auto_balance_subgroups(players_df, num_groups=6, players_per_subgroup_1=4, players_per_subgroup_2=4, force_rebalance=False, min_females_per_group=None, max_females_per_group=None, same_team_players=None):
     """
     Adaptive auto balance that automatically determines optimal subgroup skill ranges
     based on the actual data distribution. This solves issues where fixed ranges
     (like 1-8, 9-15) don't match the available player skills.
+    
+    Args:
+        same_team_players: Tuple of two player names to force on same team (optional)
     """
     st.write("🎯 **ADAPTIVE BALANCE**: Calculating optimal subgroup ranges...")
     
@@ -2681,7 +2975,8 @@ def adaptive_auto_balance_subgroups(players_df, num_groups=6, players_per_subgro
             num_groups=num_groups,
             min_females_per_group=min_females_per_group,
             max_females_per_group=max_females_per_group,
-            force_rebalance=force_rebalance
+            force_rebalance=force_rebalance,
+            same_team_players=same_team_players
         )
         
     except Exception as e:
@@ -3328,6 +3623,39 @@ if menu == "Player Import & Auto-Balance":
     st.header("📊 Player Import & Team Auto-Balancing")
     st.markdown("Import players with detailed information and automatically create balanced groups.")
     
+    # Initialize persistent team validation if not exists
+    if 'team_validation' not in st.session_state:
+        st.session_state.team_validation = {
+            'enable_same_team': False,
+            'player1_name': None,
+            'player2_name': None
+        }
+    
+    # Auto-save team validation whenever it changes
+    def save_team_validation():
+        try:
+            import json
+            with open('team_validation.json', 'w') as f:
+                json.dump(st.session_state.team_validation, f)
+        except Exception as e:
+            st.error(f"Failed to save team validation: {e}")
+    
+    # Load team validation on startup
+    def load_team_validation():
+        try:
+            import json
+            with open('team_validation.json', 'r') as f:
+                loaded_data = json.load(f)
+                st.session_state.team_validation.update(loaded_data)
+        except FileNotFoundError:
+            pass  # Use default values
+        except Exception as e:
+            st.error(f"Failed to load team validation: {e}")
+    
+    # Load team validation if not already loaded
+    if st.session_state.team_validation.get('player1_name') is None:
+        load_team_validation()
+    
     # Import Methods
     st.subheader("📥 Import Players")
     
@@ -3540,29 +3868,42 @@ if menu == "Player Import & Auto-Balance":
     # Current Player Database
     st.subheader("👥 Current Player Database")
     
+    # Toggle for skill level display
+    show_skills = st.checkbox(
+        "🎯 Show Player Skill Levels", 
+        value=False, 
+        help="Toggle to show/hide skill level information in the player database"
+    )
+    
     if not st.session_state.player_database.empty:
         # Display statistics
         total_players = len(st.session_state.player_database)
         male_players = len(st.session_state.player_database[st.session_state.player_database['gender'] == 'M'])
         female_players = len(st.session_state.player_database[st.session_state.player_database['gender'] == 'F'])
-        avg_skill = st.session_state.player_database['skill_level'].mean()
         
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Players", total_players)
-        with col2:
-            st.metric("Male Players", male_players)
-        with col3:
-            st.metric("Female Players", female_players)
-        with col4:
-            st.metric("Avg Skill Level", f"{avg_skill:.1f}")
+        if show_skills:
+            avg_skill = st.session_state.player_database['skill_level'].mean()
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Players", total_players)
+            with col2:
+                st.metric("Male Players", male_players)
+            with col3:
+                st.metric("Female Players", female_players)
+            with col4:
+                st.metric("Avg Skill Level", f"{avg_skill:.1f}")
+        else:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Players", total_players)
+            with col2:
+                st.metric("Male Players", male_players)
+            with col3:
+                st.metric("Female Players", female_players)
         
-        # Editable dataframe
-        edited_df = st.data_editor(
-            st.session_state.player_database,
-            use_container_width=True,
-            num_rows="dynamic",
-            column_config={
+        # Configure column config based on skill display toggle
+        if show_skills:
+            column_config = {
                 "skill_level": st.column_config.NumberColumn(
                     "Skill Level",
                     min_value=1,
@@ -3573,7 +3914,23 @@ if menu == "Player Import & Auto-Balance":
                     "Gender",
                     options=["M", "F"],
                 ),
-            },
+            }
+        else:
+            # Hide skill_level column when toggle is off
+            column_config = {
+                "skill_level": None,  # This hides the column
+                "gender": st.column_config.SelectboxColumn(
+                    "Gender",
+                    options=["M", "F"],
+                ),
+            }
+        
+        # Editable dataframe
+        edited_df = st.data_editor(
+            st.session_state.player_database,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config=column_config,
             key="player_database_editor"
         )
         
@@ -3844,6 +4201,14 @@ if menu == "Player Import & Auto-Balance":
                     if hasattr(st.session_state, 'detailed_groups'):
                         st.session_state.detailed_groups = {}
                     
+                    # Get persistent same team configuration
+                    same_team_players = None
+                    if (st.session_state.team_validation['enable_same_team'] and 
+                        st.session_state.team_validation['player1_name'] and 
+                        st.session_state.team_validation['player2_name']):
+                        same_team_players = (st.session_state.team_validation['player1_name'], 
+                                           st.session_state.team_validation['player2_name'])
+                    
                     # Reset player assignments in database
                     if 'group' in st.session_state.player_database.columns:
                         st.session_state.player_database['group'] = None
@@ -3867,12 +4232,15 @@ if menu == "Player Import & Auto-Balance":
                                         'max_females_per_group': max_females_sg
                                     }
                                 
+                                # Prepare same_team_players parameter from persistent configuration
+                                
                                 balanced_groups, detailed_groups = auto_balance_subgroups(
                                     st.session_state.player_database, 
                                     subgroup1_min, subgroup1_max, 
                                     subgroup2_min, subgroup2_max,
                                     subgroup1_count, subgroup2_count, num_groups,
                                     force_rebalance=True,  # Force complete redistribution
+                                    same_team_players=same_team_players,
                                     **gender_constraints
                                 )
                                 
@@ -3900,12 +4268,15 @@ if menu == "Player Import & Auto-Balance":
                                         'max_females_per_group': max_females_sg
                                     }
                                 
+                                # Prepare same_team_players parameter from persistent configuration
+                                
                                 balanced_groups, detailed_groups = adaptive_auto_balance_subgroups(
                                     st.session_state.player_database,
                                     num_groups=num_groups,
                                     players_per_subgroup_1=subgroup1_count,
                                     players_per_subgroup_2=subgroup2_count,
                                     force_rebalance=True,
+                                    same_team_players=same_team_players,
                                     **gender_constraints
                                 )
                                 
@@ -3993,11 +4364,14 @@ if menu == "Player Import & Auto-Balance":
                             'Group': st.session_state.group_names.get(group_name, group_name),
                             'Players': len(group_players_df),
                             'Males': len(group_players_df[group_players_df['gender'] == 'M']),
-                            'Females': len(group_players_df[group_players_df['gender'] == 'F']),
-                            'Avg Skill': round(group_players_df['skill_level'].mean(), 2),
-                            'Total Skill': group_players_df['skill_level'].sum(),
-                            'Skill Range': f"{group_players_df['skill_level'].min()}-{group_players_df['skill_level'].max()}"
+                            'Females': len(group_players_df[group_players_df['gender'] == 'F'])
                         }
+                        if show_skills:
+                            stats.update({
+                                'Avg Skill': round(group_players_df['skill_level'].mean(), 2),
+                                'Total Skill': group_players_df['skill_level'].sum(),
+                                'Skill Range': f"{group_players_df['skill_level'].min()}-{group_players_df['skill_level'].max()}"
+                            })
                         balance_data.append(stats)
             
             if balance_data:
@@ -4007,20 +4381,29 @@ if menu == "Player Import & Auto-Balance":
                 
                 # Balance quality metrics
                 if len(balance_data) > 1:
-                    skill_variance = balance_df['Total Skill'].var()
-                    avg_variance = balance_df['Avg Skill'].var()
                     gender_balance = balance_df['Females'].std()
                     
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Total Skill Variance", f"{skill_variance:.2f}", help="Lower is better (0 = perfectly balanced)")
-                    with col2:
-                        st.metric("Avg Skill Variance", f"{avg_variance:.3f}", help="Lower is better")
+                    if show_skills:
+                        skill_variance = balance_df['Total Skill'].var()
+                        avg_variance = balance_df['Avg Skill'].var()
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Total Skill Variance", f"{skill_variance:.2f}", help="Lower is better (0 = perfectly balanced)")
+                        with col2:
+                            st.metric("Avg Skill Variance", f"{avg_variance:.3f}", help="Lower is better")
+                    else:
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Player Balance", "Even", help="All groups have equal player counts")
                     with col3:
                         st.metric("Gender Balance Quality", f"{gender_balance:.2f}", help="Lower is better (more even distribution)")
                     with col4:
-                        skill_range = balance_df['Total Skill'].max() - balance_df['Total Skill'].min()
-                        st.metric("Skill Point Range", f"{skill_range}", help="Difference between strongest and weakest group")
+                        if show_skills:
+                            skill_range = balance_df['Total Skill'].max() - balance_df['Total Skill'].min()
+                            st.metric("Skill Point Range", f"{skill_range}", help="Difference between strongest and weakest group")
+                        else:
+                            st.metric("Player Balance", "Even", help="Groups have equal player counts")
                 
                 # Show subgroup breakdown if detailed groups exist
                 if hasattr(st.session_state, 'detailed_groups') and st.session_state.detailed_groups:
@@ -4028,7 +4411,10 @@ if menu == "Player Import & Auto-Balance":
                     st.subheader("🎯 Subgroup Distribution Analysis")
                     subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
                     subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
-                    st.info(f"Breakdown of players by skill-level subgroups ({subgroup1_name} & {subgroup2_name}) within each group")
+                    if show_skills:
+                        st.info(f"Breakdown of players by skill-level subgroups ({subgroup1_name} & {subgroup2_name}) within each group")
+                    else:
+                        st.info(f"Breakdown of players by subgroups ({subgroup1_name} & {subgroup2_name}) within each group")
                     
                     subgroup_data = []
                     for group_name, subgroups in st.session_state.detailed_groups.items():
@@ -4040,11 +4426,14 @@ if menu == "Player Import & Auto-Balance":
                                 'Subgroup': st.session_state.subgroup_names.get('subgroup1', '1 (Lower)'),
                                 'Players': len(sg1_players),
                                 'Males': subgroups['subgroup1']['male_count'],
-                                'Females': subgroups['subgroup1']['female_count'],
-                                'Avg Skill': round(sum(p['skill_level'] for p in sg1_players) / len(sg1_players), 2),
-                                'Total Skill': subgroups['subgroup1']['total_skill'],
-                                'Skill Range': f"{min(p['skill_level'] for p in sg1_players)}-{max(p['skill_level'] for p in sg1_players)}"
+                                'Females': subgroups['subgroup1']['female_count']
                             }
+                            if show_skills:
+                                sg1_stats.update({
+                                    'Avg Skill': round(sum(p['skill_level'] for p in sg1_players) / len(sg1_players), 2),
+                                    'Total Skill': subgroups['subgroup1']['total_skill'],
+                                    'Skill Range': f"{min(p['skill_level'] for p in sg1_players)}-{max(p['skill_level'] for p in sg1_players)}"
+                                })
                             subgroup_data.append(sg1_stats)
                         
                         # Subgroup 2 stats  
@@ -4055,11 +4444,14 @@ if menu == "Player Import & Auto-Balance":
                                 'Subgroup': st.session_state.subgroup_names.get('subgroup2', '2 (Higher)'),
                                 'Players': len(sg2_players),
                                 'Males': subgroups['subgroup2']['male_count'],
-                                'Females': subgroups['subgroup2']['female_count'],
-                                'Avg Skill': round(sum(p['skill_level'] for p in sg2_players) / len(sg2_players), 2),
-                                'Total Skill': subgroups['subgroup2']['total_skill'],
-                                'Skill Range': f"{min(p['skill_level'] for p in sg2_players)}-{max(p['skill_level'] for p in sg2_players)}"
+                                'Females': subgroups['subgroup2']['female_count']
                             }
+                            if show_skills:
+                                sg2_stats.update({
+                                    'Avg Skill': round(sum(p['skill_level'] for p in sg2_players) / len(sg2_players), 2),
+                                    'Total Skill': subgroups['subgroup2']['total_skill'],
+                                    'Skill Range': f"{min(p['skill_level'] for p in sg2_players)}-{max(p['skill_level'] for p in sg2_players)}"
+                                })
                             subgroup_data.append(sg2_stats)
                     
                     if subgroup_data:
@@ -4067,45 +4459,54 @@ if menu == "Player Import & Auto-Balance":
                         st.dataframe(subgroup_df, use_container_width=True)
                         
                         # Subgroup balance metrics
-                        subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
-                        subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
-                        
-                        sg1_data = [row for row in subgroup_data if subgroup1_name in row['Subgroup']]
-                        sg2_data = [row for row in subgroup_data if subgroup2_name in row['Subgroup']]
-                        
-                        if sg1_data and sg2_data:
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.markdown(f"**{subgroup1_name} Balance**")
-                                sg1_df = pd.DataFrame(sg1_data)
-                                sg1_variance = sg1_df['Total Skill'].var()
-                                sg1_range = sg1_df['Total Skill'].max() - sg1_df['Total Skill'].min()
-                                st.metric("Skill Variance", f"{sg1_variance:.2f}")
-                                st.metric("Skill Range", f"{sg1_range}")
-                                
-                            with col2:
-                                st.markdown(f"**{subgroup2_name} Balance**")
-                                sg2_df = pd.DataFrame(sg2_data)
-                                sg2_variance = sg2_df['Total Skill'].var()
-                                sg2_range = sg2_df['Total Skill'].max() - sg2_df['Total Skill'].min()
-                                st.metric("Skill Variance", f"{sg2_variance:.2f}")
-                                st.metric("Skill Range", f"{sg2_range}")
+                        if show_skills:
+                            subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
+                            subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
+                            
+                            sg1_data = [row for row in subgroup_data if subgroup1_name in row['Subgroup']]
+                            sg2_data = [row for row in subgroup_data if subgroup2_name in row['Subgroup']]
+                            
+                            if sg1_data and sg2_data:
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.markdown(f"**{subgroup1_name} Balance**")
+                                    sg1_df = pd.DataFrame(sg1_data)
+                                    sg1_variance = sg1_df['Total Skill'].var()
+                                    sg1_range = sg1_df['Total Skill'].max() - sg1_df['Total Skill'].min()
+                                    st.metric("Skill Variance", f"{sg1_variance:.2f}")
+                                    st.metric("Skill Range", f"{sg1_range}")
+                                    
+                                with col2:
+                                    st.markdown(f"**{subgroup2_name} Balance**")
+                                    sg2_df = pd.DataFrame(sg2_data)
+                                    sg2_variance = sg2_df['Total Skill'].var()
+                                    sg2_range = sg2_df['Total Skill'].max() - sg2_df['Total Skill'].min()
+                                    st.metric("Skill Variance", f"{sg2_variance:.2f}")
+                                    st.metric("Skill Range", f"{sg2_range}")
+                        else:
+                            st.info("ℹ️ Enable 'Show Player Skill Levels' to see skill balance metrics")
                 
                 # Detailed Player Distribution
                 st.subheader("👥 Detailed Player Distribution")
-                st.info("Players in each group, sorted by skill level (highest to lowest)")
+                if show_skills:
+                    st.info("Players in each group, sorted by skill level (highest to lowest)")
+                else:
+                    st.info("Players in each group")
                 
                 # Create tabs for each group
                 if group_player_details:
-                    # Create tabs with group display names and skill points
+                    # Create tabs with group display names and optionally skill points
                     tab_labels = []
                     for group_name in group_player_details.keys():
                         display_name = st.session_state.group_names.get(group_name, group_name)
-                        # Find matching balance data by display name
-                        matching_balance = balance_df[balance_df['Group'] == display_name]
-                        if not matching_balance.empty:
-                            total_skill = matching_balance['Total Skill'].iloc[0]
-                            tab_labels.append(f"{display_name} ({total_skill} pts)")
+                        if show_skills:
+                            # Find matching balance data by display name
+                            matching_balance = balance_df[balance_df['Group'] == display_name]
+                            if not matching_balance.empty:
+                                total_skill = matching_balance['Total Skill'].iloc[0]
+                                tab_labels.append(f"{display_name} ({total_skill} pts)")
+                            else:
+                                tab_labels.append(display_name)
                         else:
                             tab_labels.append(display_name)
                     
@@ -4118,15 +4519,22 @@ if menu == "Player Import & Auto-Balance":
                             group_stats = next((x for x in balance_data if x['Group'] == display_name), None)
                             
                             if group_stats:
-                                col1, col2, col3, col4 = st.columns(4)
-                                with col1:
-                                    st.metric("Total Players", group_stats['Players'])
-                                with col2:
-                                    st.metric("Males/Females", f"{group_stats['Males']}/{group_stats['Females']}")
-                                with col3:
-                                    st.metric("Average Skill", group_stats['Avg Skill'])
-                                with col4:
-                                    st.metric("Total Skill Points", group_stats['Total Skill'])
+                                if show_skills:
+                                    col1, col2, col3, col4 = st.columns(4)
+                                    with col1:
+                                        st.metric("Total Players", group_stats['Players'])
+                                    with col2:
+                                        st.metric("Males/Females", f"{group_stats['Males']}/{group_stats['Females']}")
+                                    with col3:
+                                        st.metric("Average Skill", group_stats['Avg Skill'])
+                                    with col4:
+                                        st.metric("Total Skill Points", group_stats['Total Skill'])
+                                else:
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        st.metric("Total Players", group_stats['Players'])
+                                    with col2:
+                                        st.metric("Males/Females", f"{group_stats['Males']}/{group_stats['Females']}")
                                 
                                 # Player list with details
                                 st.markdown("**Players:**")
@@ -4138,28 +4546,45 @@ if menu == "Player Import & Auto-Balance":
                                     # Subgroup 1
                                     if subgroups['subgroup1']['players']:
                                         subgroup1_name = st.session_state.subgroup_names.get('subgroup1', '1 (Lower)')
-                                        sg1_total_skill = subgroups['subgroup1']['total_skill']
-                                        st.markdown(f"***🔽 {subgroup1_name} ({len(subgroups['subgroup1']['players'])} players, {sg1_total_skill} pts)***")
+                                        if show_skills:
+                                            sg1_total_skill = subgroups['subgroup1']['total_skill']
+                                            st.markdown(f"***🔽 {subgroup1_name} ({len(subgroups['subgroup1']['players'])} players, {sg1_total_skill} pts)***")
+                                        else:
+                                            st.markdown(f"***🔽 {subgroup1_name} ({len(subgroups['subgroup1']['players'])} players)***")
+                                        
                                         for idx, player in enumerate(subgroups['subgroup1']['players'], 1):
                                             gender_icon = "👨" if player['gender'] == 'M' else "👩"
-                                            skill_stars = "⭐" * min(player['skill_level'], 5)
-                                            st.write(f"  {idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                            if show_skills:
+                                                skill_stars = "⭐" * min(player['skill_level'], 5)
+                                                st.write(f"  {idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                            else:
+                                                st.write(f"  {idx}. {gender_icon} **{player['name']}** - {player['email']}")
                                     
                                     # Subgroup 2
                                     if subgroups['subgroup2']['players']:
                                         subgroup2_name = st.session_state.subgroup_names.get('subgroup2', '2 (Higher)')
-                                        sg2_total_skill = subgroups['subgroup2']['total_skill']
-                                        st.markdown(f"***🔼 {subgroup2_name} ({len(subgroups['subgroup2']['players'])} players, {sg2_total_skill} pts)***")
+                                        if show_skills:
+                                            sg2_total_skill = subgroups['subgroup2']['total_skill']
+                                            st.markdown(f"***🔼 {subgroup2_name} ({len(subgroups['subgroup2']['players'])} players, {sg2_total_skill} pts)***")
+                                        else:
+                                            st.markdown(f"***🔼 {subgroup2_name} ({len(subgroups['subgroup2']['players'])} players)***")
+                                        
                                         for idx, player in enumerate(subgroups['subgroup2']['players'], 1):
                                             gender_icon = "👨" if player['gender'] == 'M' else "👩"
-                                            skill_stars = "⭐" * min(player['skill_level'], 15)
-                                            st.write(f"  {idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                            if show_skills:
+                                                skill_stars = "⭐" * min(player['skill_level'], 15)
+                                                st.write(f"  {idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                            else:
+                                                st.write(f"  {idx}. {gender_icon} **{player['name']}** - {player['email']}")
                                 else:
                                     # Regular display without subgroups
                                     for idx, (_, player) in enumerate(players_df.iterrows(), 1):
                                         gender_icon = "👨" if player['gender'] == 'M' else "👩"
-                                        skill_stars = "⭐" * min(player['skill_level'], 15)
-                                        st.write(f"{idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                        if show_skills:
+                                            skill_stars = "⭐" * min(player['skill_level'], 15)
+                                            st.write(f"{idx}. {gender_icon} **{player['name']}** (Skill: {player['skill_level']} {skill_stars}) - {player['email']}")
+                                        else:
+                                            st.write(f"{idx}. {gender_icon} **{player['name']}** - {player['email']}")
                             else:
                                 st.warning(f"No balance data found for {display_name}")
                 
@@ -4171,28 +4596,38 @@ if menu == "Player Import & Auto-Balance":
                     total_players = sum(stats['Players'] for stats in balance_data)
                     total_males = sum(stats['Males'] for stats in balance_data)
                     total_females = sum(stats['Females'] for stats in balance_data)
-                    total_skill = sum(stats['Total Skill'] for stats in balance_data)
-                    avg_group_skill = total_skill / 6
                     
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Tournament Players", total_players, "Target: 60")
-                    with col2:
-                        st.metric("Gender Distribution", f"{total_males}M / {total_females}F")
-                    with col3:
-                        st.metric("Target Group Skill", f"{avg_group_skill:.1f}", "All groups should be close to this")
-                    
-                    # Balance quality assessment
-                    max_skill_diff = max(stats['Total Skill'] for stats in balance_data) - min(stats['Total Skill'] for stats in balance_data)
-                    
-                    if max_skill_diff <= 5:
-                        st.success("✅ Excellent balance! Groups are very evenly matched.")
-                    elif max_skill_diff <= 10:
-                        st.info("ℹ️ Good balance. Groups are reasonably matched.")
-                    elif max_skill_diff <= 15:
-                        st.warning("⚠️ Fair balance. Consider re-balancing for better competition.")
+                    if show_skills:
+                        total_skill = sum(stats['Total Skill'] for stats in balance_data)
+                        avg_group_skill = total_skill / 6
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Tournament Players", total_players, "Target: 60")
+                        with col2:
+                            st.metric("Gender Distribution", f"{total_males}M / {total_females}F")
+                        with col3:
+                            st.metric("Target Group Skill", f"{avg_group_skill:.1f}", "All groups should be close to this")
+                        
+                        # Balance quality assessment
+                        max_skill_diff = max(stats['Total Skill'] for stats in balance_data) - min(stats['Total Skill'] for stats in balance_data)
+                        
+                        if max_skill_diff <= 5:
+                            st.success("✅ Excellent balance! Groups are very evenly matched.")
+                        elif max_skill_diff <= 10:
+                            st.info("ℹ️ Good balance. Groups are reasonably matched.")
+                        elif max_skill_diff <= 15:
+                            st.warning("⚠️ Fair balance. Consider re-balancing for better competition.")
+                        else:
+                            st.error("❌ Poor balance. Re-balancing strongly recommended.")
                     else:
-                        st.error("❌ Poor balance. Re-balancing strongly recommended.")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Tournament Players", total_players, "Target: 60")
+                        with col2:
+                            st.metric("Gender Distribution", f"{total_males}M / {total_females}F")
+                        
+                        st.info("ℹ️ Enable 'Show Player Skill Levels' to see balance quality assessment")
     else:
         st.info("No players in database. Import some players to get started!")
 
@@ -4705,6 +5140,162 @@ elif menu == "Team Details":
                         file_name="detailed_team_roster.csv",
                         mime="text/csv"
                     )
+
+# --- TAB 3.5: ENABLE TEAM VALIDATION ---
+elif menu == "Enable Team Validation":
+    st.header("🔗 Enable Team Validation")
+    st.markdown("Configure persistent team validation rules to force specific players on the same team.")
+    
+    # Initialize if not exists
+    if 'team_validation' not in st.session_state:
+        st.session_state.team_validation = {
+            'enable_same_team': False,
+            'player1_name': None,
+            'player2_name': None
+        }
+    
+    # Auto-save function 
+    def save_team_validation():
+        try:
+            import json
+            with open('team_validation.json', 'w') as f:
+                json.dump(st.session_state.team_validation, f)
+            st.success("✅ Team validation configuration saved!")
+        except Exception as e:
+            st.error(f"❌ Failed to save configuration: {e}")
+    
+    # Load function
+    def load_team_validation():
+        try:
+            import json
+            with open('team_validation.json', 'r') as f:
+                loaded_data = json.load(f)
+                st.session_state.team_validation.update(loaded_data)
+            st.success("✅ Configuration loaded!")
+        except FileNotFoundError:
+            st.info("No saved configuration found. Using defaults.")
+        except Exception as e:
+            st.error(f"❌ Failed to load configuration: {e}")
+    
+    # Configuration UI
+    st.subheader("👥 Force Same Team Restriction")
+    st.info("Configure two specific players to always be placed on the same team during auto-balancing.")
+    
+    # Enable/Disable toggle
+    enable_same_team = st.checkbox(
+        "🔗 Enable 'Force Same Team' restriction", 
+        value=st.session_state.team_validation['enable_same_team'],
+        help="Force two specific players to be on the same team",
+        key="team_validation_enable"
+    )
+    
+    # Update state when checkbox changes
+    if enable_same_team != st.session_state.team_validation['enable_same_team']:
+        st.session_state.team_validation['enable_same_team'] = enable_same_team
+        save_team_validation()
+    
+    player1_name = None
+    player2_name = None
+    
+    if enable_same_team:
+        if not st.session_state.player_database.empty:
+            available_players = st.session_state.player_database['name'].tolist()
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                player1_name = st.selectbox(
+                    "Select Player 1:",
+                    options=[None] + available_players,
+                    index=([None] + available_players).index(st.session_state.team_validation['player1_name']) 
+                          if st.session_state.team_validation['player1_name'] in available_players 
+                          else 0,
+                    help="First player to be forced on same team",
+                    key="team_validation_player1"
+                )
+            
+            with col2:
+                # Filter out Player 1 from Player 2 options
+                player2_options = [None] + [p for p in available_players if p != player1_name]
+                current_player2 = st.session_state.team_validation['player2_name']
+                try:
+                    p2_index = player2_options.index(current_player2) if current_player2 in player2_options else 0
+                except ValueError:
+                    p2_index = 0
+                    
+                player2_name = st.selectbox(
+                    "Select Player 2:",
+                    options=player2_options,
+                    index=p2_index,
+                    help="Second player to be forced on same team",
+                    key="team_validation_player2"
+                )
+            
+            # Update state when selections change
+            if (player1_name != st.session_state.team_validation['player1_name'] or 
+                player2_name != st.session_state.team_validation['player2_name']):
+                st.session_state.team_validation['player1_name'] = player1_name
+                st.session_state.team_validation['player2_name'] = player2_name
+                save_team_validation()
+            
+            # Validation and status
+            if player1_name and player2_name:
+                if player1_name == player2_name:
+                    st.error("❌ Please select two different players")
+                else:
+                    st.success(f"✅ **{player1_name}** and **{player2_name}** will be placed on the same team")
+                    st.info("💡 This configuration will be automatically applied during auto-balancing")
+            elif player1_name and not player2_name:
+                st.warning("⚠️ Please select both players to enable this restriction")
+            elif not player1_name and player2_name:
+                st.warning("⚠️ Please select both players to enable this restriction")
+        else:
+            st.warning("⚠️ No players available. Import players first in the 'Player Import & Auto-Balance' tab.")
+            st.info("Once you import players, you can configure team validation here.")
+    else:
+        st.info("Team validation is currently disabled. Check the box above to configure forced same-team assignments.")
+    
+    # Configuration status 
+    st.divider()
+    st.subheader("📊 Current Configuration Status")
+    
+    if st.session_state.team_validation['enable_same_team']:
+        if (st.session_state.team_validation['player1_name'] and 
+            st.session_state.team_validation['player2_name']):
+            st.success(f"✅ **Active**: {st.session_state.team_validation['player1_name']} and {st.session_state.team_validation['player2_name']} will be on the same team")
+        else:
+            st.warning("⚠️ **Enabled but Incomplete**: Please select both players")
+    else:
+        st.info("ℹ️ **Disabled**: No team validation rules active")
+    
+    # Manual save/load buttons
+    st.divider() 
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("💾 Save Configuration"):
+            save_team_validation()
+    
+    with col2:
+        if st.button("📂 Load Configuration"):
+            load_team_validation()
+            st.rerun()
+    
+    with col3:
+        if st.button("🗑️ Clear Configuration"):
+            st.session_state.team_validation = {
+                'enable_same_team': False,
+                'player1_name': None,
+                'player2_name': None
+            }
+            try:
+                import os
+                if os.path.exists('team_validation.json'):
+                    os.remove('team_validation.json')
+                st.success("✅ Configuration cleared!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Error clearing configuration: {e}")
 
 # --- TAB 4: MATCH SCHEDULE ---
 elif menu == "Match Schedule":
